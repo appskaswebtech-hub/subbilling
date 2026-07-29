@@ -1,0 +1,35 @@
+node_modules
+.DS_Store
+
+/.cache
+/build
+/app/build
+/public/build/
+/public/_dev
+/app/public/build
+/prisma/dev.sqlite
+/prisma/dev.sqlite-journal
+database.sqlite
+
+.env
+.env.*
+
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+/extensions/*/dist
+
+# Ignore shopify files created during app dev
+.shopify/*
+.shopify.lock
+
+.env
+
+# Stray copies of .env that lack the leading dot — these leaked the
+# Shopify API secret into git history once already. Do not remove.
+/y
+/env
+*.env
+env.backup
+.env.backup

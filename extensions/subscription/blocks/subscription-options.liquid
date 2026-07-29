@@ -1,0 +1,148 @@
+<link rel="stylesheet" href="{{ 'subscription.css' | asset_url }}">
+
+{%- if product.selling_plan_groups.size > 0 -%}
+
+{%- comment -%} Pass accent color from block settings into CSS variable {%- endcomment -%}
+<style>
+  #sub-widget-{{ block.id }} {
+    --sub-accent: {{ block.settings.accent_color }};
+    --sub-accent-light: {{ block.settings.accent_color }}18;
+    --sub-border-active: {{ block.settings.accent_color }};
+    --sub-bg-active: {{ block.settings.accent_color }}0f;
+    --sub-shadow-active: 0 0 0 3px {{ block.settings.accent_color }}26;
+  }
+</style>
+
+<div class="sub-widget" id="sub-widget-{{ block.id }}">
+
+  {%- comment -%}
+    Per-variant map of the selling plans actually allocated to each variant:
+    { "<variantId>": { "<sellingPlanId>": <subscriptionPriceInCents>, ... }, ... }
+    The JS uses this to only show a subscription for the variants it was assigned to.
+  {%- endcomment -%}
+  <script type="application/json" class="sub-variant-plans">
+  {
+    {%- for variant in product.variants -%}
+      "{{ variant.id }}": {
+        {%- for alloc in variant.selling_plan_allocations -%}
+          "{{ alloc.selling_plan.id }}": {{ alloc.price | default: variant.price }}{%- unless forloop.last -%},{%- endunless -%}
+        {%- endfor -%}
+      }{%- unless forloop.last -%},{%- endunless -%}
+    {%- endfor -%}
+  }
+  </script>
+
+  <p class="sub-widget__label">Purchase Options</p>
+
+  <div class="sub-widget__options" role="radiogroup" aria-label="Purchase options">
+
+    {%- comment -%} ONE-TIME PURCHASE {%- endcomment -%}
+    <label class="sub-option sub-option--active" for="sub-onetime-{{ block.id }}">
+      <input
+        class="sub-option__radio"
+        type="radio"
+        id="sub-onetime-{{ block.id }}"
+        name="sub_purchase_option_{{ block.id }}"
+        value=""
+        autocomplete="off"
+        checked
+      />
+      <span class="sub-option__inner">
+        <span class="sub-option__left">
+          <span class="sub-option__dot"></span>
+          <span class="sub-option__title">One-time purchase</span>
+        </span>
+        <span class="sub-option__price" data-base-price="{{ product.selected_or_first_available_variant.price }}">
+          {{ product.selected_or_first_available_variant.price | money }}
+        </span>
+      </span>
+    </label>
+
+    {%- comment -%} SUBSCRIPTION OPTIONS {%- endcomment -%}
+    {%- for group in product.selling_plan_groups -%}
+      {%- for plan in group.selling_plans -%}
+
+        {%- assign base_price   = product.selected_or_first_available_variant.price -%}
+        {%- assign discount_pct = 0 -%}
+        {%- assign final_price  = base_price -%}
+
+        {%- for adj in plan.price_adjustments -%}
+          {%- if adj.value_type == 'percentage' -%}
+            {%- assign discount_pct = adj.value -%}
+            {%- assign discount_amt = base_price | times: discount_pct | divided_by: 100 -%}
+            {%- assign final_price  = base_price | minus: discount_amt -%}
+          {%- elsif adj.value_type == 'fixed_amount' -%}
+            {%- assign final_price  = base_price | minus: adj.value -%}
+          {%- elsif adj.value_type == 'price' -%}
+            {%- assign final_price  = adj.value -%}
+          {%- endif -%}
+        {%- endfor -%}
+
+        <label
+          class="sub-option"
+          for="sub-plan-{{ plan.id }}-{{ block.id }}"
+          data-plan-id="{{ plan.id }}"
+          data-plan-price="{{ final_price }}"
+          data-discount="{{ discount_pct }}"
+        >
+          <input
+            class="sub-option__radio"
+            type="radio"
+            id="sub-plan-{{ plan.id }}-{{ block.id }}"
+            name="sub_purchase_option_{{ block.id }}"
+            value="{{ plan.id }}"
+            autocomplete="off"
+          />
+          <span class="sub-option__inner">
+            <span class="sub-option__left">
+              <span class="sub-option__dot"></span>
+              <span class="sub-option__title">
+                {{ group.name }}
+                {%- if discount_pct > 0 -%}
+                  <span class="sub-option__badge">SAVE {{ discount_pct }}%</span>
+                {%- endif -%}
+              </span>
+            </span>
+            <span class="sub-option__price">
+              {{ final_price | money }}
+            </span>
+          </span>
+        </label>
+
+      {%- endfor -%}
+    {%- endfor -%}
+
+  </div>
+
+  {%- if block.settings.show_savings -%}
+    <div class="sub-widget__savings" id="sub-savings-{{ block.id }}" aria-live="polite"></div>
+  {%- endif -%}
+
+</div>
+
+{%- endif -%}
+
+<script src="{{ 'subscription.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Subscription Options",
+  "target": "section",
+  "templates": ["product"],
+  "settings": [
+    {
+      "type": "color",
+      "id": "accent_color",
+      "label": "Accent color",
+      "default": "#f97316"
+    },
+    {
+      "type": "checkbox",
+      "id": "show_savings",
+      "label": "Show savings callout",
+      "default": true
+    }
+  ]
+}
+{% endschema %}
+

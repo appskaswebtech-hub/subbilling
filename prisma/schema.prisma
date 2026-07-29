@@ -1,0 +1,146 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Shopify Default Session (keep as-is) ───────────────────────────────────
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?   @db.Text
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model SellingPlanGroup {
+  id              String   @id @default(cuid())
+  shop            String
+  shopifyGroupId  String?
+  name            String
+  interval        String
+  intervalCount   Int
+  discount        Float    @default(0)
+  discountType    String   @default("percentage")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([shop])
+}
+
+model Subscription {
+  id                String   @id @default(cuid())
+  shop              String
+  shopifyContractId String   @unique                // ← was String? — must be unique for upsert
+  customerId        String
+  customerEmail     String
+  productTitle      String
+  planName          String
+  status            String   @default("ACTIVE")
+  price             Float
+  frequency         String
+  nextBillingDate   DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  billingAttempts   BillingAttempt[]
+
+  @@index([shop])
+  @@index([status])
+}
+
+model BillingAttempt {
+  id             String       @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id])
+  amount         Float
+  status         String
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+
+  @@index([subscriptionId])
+}
+
+model AppSettings {
+  id                    String   @id @default(cuid())
+  shop                  String   @unique          // one settings row per shop
+
+  // ── Notifications ──────────────────────────────────────────
+  notifyOnBillingFailure  Boolean  @default(true)
+  notifyOnCancellation    Boolean  @default(true)
+  notifyOnNewSubscription Boolean  @default(false)
+  notificationEmail       String   @default("")   // override email; empty = use shop owner email
+
+  // ── Billing behaviour ──────────────────────────────────────
+  maxBillingRetries     Int      @default(3)      // how many times to retry a failed charge
+  gracePeriodDays       Int      @default(7)      // days before cancelling after repeated failures
+
+  // ── Customer portal ────────────────────────────────────────
+  allowCustomerPause    Boolean  @default(true)   // show Pause button in customer portal
+  allowCustomerCancel   Boolean  @default(true)   // show Cancel button in customer portal
+
+
+  // ── Widget appearance ───────────────────────────────────────
+  widgetPrimaryColor    String   @default("#5B4FCB")
+  widgetBadgeColor      String   @default("#F5A623")
+  widgetBorderRadius    Int      @default(10)
+  widgetShowOnetime     Boolean  @default(true)
+  widgetDesign          String   @default("arctic")
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([shop])
+}
+model ShopPlan {
+  id               Int       @id @default(autoincrement())
+  shop             String    @unique
+  plan             String    @default("free")   // "basic" | "pro" | "advanced"
+  subscriptionId   String?                       // Shopify AppSubscription GID
+  status           String    @default("active")  // "active" | "cancelled" | "expired"
+  trialEndsAt      DateTime?
+  billingStartedAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([shop])
+}
+
+// ─── Public API Key ───────────────────────────────────────────────────────────
+// One API key per shop — used by merchants to access the public REST API
+model ApiKey {
+  id        String   @id @default(cuid())
+  shop      String   @unique
+  key       String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([key])
+  @@index([shop])
+}
+model LoyaltyDiscount {
+  id             String   @id @default(cuid())
+  shop           String   @unique
+  name           String   @default("Loyalty discount")
+  applyOnRenewal Int      @default(1)
+  discountValue  Float    @default(10)
+  enabled        Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

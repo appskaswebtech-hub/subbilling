@@ -1,0 +1,56 @@
+{% comment %}
+  KAS — Hide Native Selector
+  This theme uses <product-subscriptions data-module="product/subscriptions">
+  as the wrapper for the native selling plan UI.
+{% endcomment %}
+
+<style id="kas-hide-native-css">
+  product-subscriptions[data-module="product/subscriptions"] {
+    display: none !important;
+  }
+</style>
+
+<script>
+(function () {
+  function removeNative() {
+    document.querySelectorAll('product-subscriptions[data-module="product/subscriptions"]').forEach(function (el) {
+      el.remove();
+    });
+  }
+
+  removeNative();
+  document.addEventListener('DOMContentLoaded', removeNative);
+  window.addEventListener('load', removeNative);
+
+  var observer = new MutationObserver(function (mutations) {
+    mutations.forEach(function (m) {
+      if (m.addedNodes.length) removeNative();
+    });
+  });
+
+  function startObserver() {
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startObserver);
+  } else {
+    startObserver();
+  }
+
+  document.addEventListener('variant:change', function () { setTimeout(removeNative, 100); });
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.name === 'id') setTimeout(removeNative, 100);
+  });
+
+})();
+</script>
+
+{% schema %}
+{
+  "name": "KAS Hide Native Selector",
+  "target": "body"
+}
+{% endschema %}

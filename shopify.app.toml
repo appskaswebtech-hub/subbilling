@@ -1,0 +1,42 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "72e2c177c84e8fb0b9f4ee027fa0cafa"
+name = "Smart Subscriptions"
+application_url = "https://subscription.kaswebtechsolutions.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-04"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks"
+  topics = [
+  "subscription_contracts/update",
+  "subscription_billing_attempts/success",
+  "subscription_billing_attempts/failure",
+  "subscription_contracts/create"
+]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "customer_read_customers,customer_read_own_subscription_contracts,customer_write_own_subscription_contracts,read_customer_payment_methods,read_customers,read_draft_orders,read_inventory,read_orders,read_own_subscription_contracts,read_products,read_purchase_options,write_customers,write_draft_orders,write_own_subscription_contracts,write_products,write_purchase_options"
+
+[auth]
+redirect_urls = [ "https://subscription.kaswebtechsolutions.com/api/auth" ]
+
+[app_proxy]
+url = "https://subscription.kaswebtechsolutions.com"
+subpath = "subscriptions"
+prefix = "apps"

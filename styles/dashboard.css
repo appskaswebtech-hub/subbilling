@@ -1,0 +1,206 @@
+.breadcrumbs-dashboard span.subscription {
+    color: #6251d0;
+}
+.top-analytics-btn .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantPrimary {
+    background: #5C4FC4;
+    border: none;
+    box-shadow: none;
+   padding: 10px 16px;
+}
+.top-analytics-btn .Polaris-Button .Polaris-Text--root {
+    display: flex;
+    gap: 8px;
+}
+.top-analytics-btn .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantSecondary {
+    padding: 10px 16px;
+}
+
+
+.top-analytics-btn .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantSecondary {
+    /* border: none; */
+    padding: 10px 16px;
+    border: 1px solid #E3E3E3;
+    box-shadow: none;
+    color: #1A1A1A;
+}
+.top-analytics-btn .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantPrimary svg {
+    fill: #5c4fc4;
+}
+.top-analytics-btn .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantSecondary svg {
+    fill: #1A1A1A;
+}
+.total_contracts >div {
+    padding: 28px  !important;
+    border-left: 2px solid #5300B7 !important;
+}
+.total_contracts-second>div {
+    padding: 28px  !important;
+    border-left: 2px solid #F97316 !important;
+}
+
+.total_contracts-third>div {
+    padding: 28px  !important;
+    border-left: 2px solid #BA1A1A !important;
+}
+.total_contracts-fourth>div {
+    padding: 28px  !important;
+    border-left: 2px solid #059669 !important;
+}
+.table-banner table thead {
+    background-color: #F9FAFB;
+}
+.page-Selling.plans .Polaris-Button.Polaris-Button--pressable.Polaris-Button--variantPrimary {
+    background: #5C4FC4;
+    border: none;
+    box-shadow: none;
+    padding: 10px 16px;
+}
+.sellingplanloading>div {
+    background: #FFFFFF !important;
+    border: 1px solid #E3E3E3 !important;
+    border-radius: 24px !important;
+}
+.planusageloading>div {
+    border-radius: 50px !important;
+}
+.planusageremaining span {
+    COLOR: #5C4FC4;
+}
+span.enable-subs {
+    color: #5C4FC4 !important;
+    font-weight: 600;
+}
+span.enable-subs-text {
+    color: #1a1a1a !important;
+    font-weight: 400;
+   line-height: 20px;
+}
+.plancardsynced>div {
+    background: #E3F7EE !important;
+    color: #1A8A55 !important;
+    font-weight: 600 !important;
+}
+span.percent-text
+{
+  color: #2DBA75 !important;
+    font-weight: 600 !important;
+
+}
+button.remove-button,button.delete-button {
+    border: 1px solid #E03E3E !IMPORTANT;
+    BORDER-RADIUS: 12PX !IMPORTANT;
+    COLOR: #E03E3E !IMPORTANT;
+}
+button.assign-button {
+    background: #5C4FC4 !important;
+    border-radius: 12px !important;
+}
+button.edit-button {
+    border: 1px solid #5C4FC4 !IMPORTANT;
+    BORDER-RADIUS: 12PX !IMPORTANT;
+    COLOR: #5C4FC4 !IMPORTANT;
+}
+.card-section>div button {
+    padding: 26px  16px !important;
+    border: 1px solid #E5E7EB !important;
+    box-shadow: 0px 1px 2px 0px #0000000D !important;
+    border-radius: 12px !important;
+}
+.card-section>div button div:nth-child(2) {
+    left: 0px !important;
+    right: 0px !important;
+}
+.search-filter {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 24px;
+}
+.search-filter .filter-toolbar {
+    flex: 1;
+    border: 1px solid #D1D5DB !important;
+    border-radius: 6px !important;
+    background-color: #fff !important;
+}
+.main-card-item table {
+    background: #FFFFFF;
+    border-radius: 10px !important;
+}
+.main-card-item thead {
+    background: #F6F6F7 !important;
+    border-bottom: 1px solid #E3E3E3 !important;
+}
+.main-card-item table th,.main-card-item table tr td {
+    padding: 16px !important;
+}
+.customer-mail {
+    color: #111827 !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+}
+.top-pills {
+    background: #DCFCE7 !important;
+    color: #15803D !important;
+    font-weight: 700 !important;
+}
+.top-pills  .bottom-pills {
+    background: #22C55E !important;
+}
+td.price-section {
+    color: #111827 !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+}
+.main-card-item table th {
+    color: #6D7175 !important;
+    font-weight: 600 !important;
+    font-size: 11px !important;
+}
+.footer-sun-section {
+    border: 1px solid #E3E3E3 !important;
+}
+.footer-sun-section .body-sm .Polaris-Text--root {
+    color: #1A1A1A !important;
+    font-size: 13px;
+    letter-spacing: 0px;
+}
+button.refresh-preview {
+    color: #1A1A1A !important;
+    font-weight: 500 !important;
+}
+.varient-section {
+    margin-top: 16px;
+}
+.breadcrumbs-dashboard span.subscription {
+    color: #6251d0;
+}
+.tow-bottom-cust {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.layout-main-grid {
+    display: flex;
+    gap: 20px;
+}
+.layout-main-grid .layout-left {
+   width: 68%;
+}
+.total-spend {
+    background: #F4F2FF;
+    padding: 16px;
+    margin-top: 20px;
+    border-radius: 8px;
+}
+.total-spend>div {
+    padding: 0px !important;
+}
+.total-spend>div span.Polaris-Text--root.Polaris-Text--bodySm.Polaris-Text--subdued {
+    color: #4338CA;
+    font-weight: 600;
+}
+.total-spend>div  span.Polaris-Text--root.Polaris-Text--bodySm.Polaris-Text--semibold {
+    color: #4338CA;
+    font-weight: 700;
+    font-size: 18px;
+}
+

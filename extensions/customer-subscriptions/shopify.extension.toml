@@ -1,0 +1,54 @@
+# Learn more about configuring your Customer account UI extension:
+# https://shopify.dev/api/customer-account-ui-extensions/unstable/configuration
+
+api_version = "2026-04"
+
+# --- Extension 1: Order Status Block + Profile Block ---
+[[extensions]]
+name = "customer-subscriptions"
+handle = "customer-subscriptions"
+type = "ui_extension"
+uid = "46cf9acb-857d-5f02-2dad-661da56042d46648dbe0"
+
+[[extensions.targeting]]
+module = "./src/OrderStatusBlock.jsx"
+target = "customer-account.order-status.block.render"
+
+[[extensions.targeting]]
+module = "./src/ProfileBlock.jsx"
+target = "customer-account.profile.block.render"
+
+[extensions.capabilities]
+api_access = true
+network_access = true
+
+# --- Extension 2: Subscriptions List Page ---
+[[extensions]]
+name = "customer-subscriptions-dashboard"
+handle = "customer-subscriptions-dashboard"
+type = "ui_extension"
+uid = "1ba371e6-831d-4612-b4c8-6853aff36c95"
+
+[[extensions.targeting]]
+module = "./src/MyCustomPage.jsx"
+target = "customer-account.page.render"
+
+[extensions.capabilities]
+api_access = true
+network_access = true
+
+# --- Extension 3: Subscription Detail Page ---
+[[extensions]]
+name = "customer-subscription-detail"
+handle = "customer-subscription-detail"
+
+uid = "3d785d97-28d3-b85c-9b2b-f48a332bc372dc6df52a"
+type = "ui_extension"
+
+[[extensions.targeting]]
+module = "./src/SubscriptionDetailPage.jsx"
+target = "customer-account.page.render"
+
+[extensions.capabilities]
+api_access = true
+network_access = true
