@@ -57,6 +57,7 @@ type CustomerRow = {
   mrr:               number;
   totalCollected:    number;
   lastSubDate:       string | null;
+  lastSubAt:         number | null;
 };
 
 // ─── Loader ───────────────────────────────────────────────────
@@ -66,6 +67,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const q    = url.searchParams.get("q") ?? "";
   const page = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
   const skip = (page - 1) * PAGE_SIZE;
+
+  // ── Filters ──────────────────────────────────────────────────
+  const statusFilter = url.searchParams.get("status") ?? "";   // active | partial | inactive
+  const rangeFilter  = url.searchParams.get("range")  ?? "";   // 30 | 90 | 365 (days)
+  const minMrrRaw    = url.searchParams.get("minMrr");
+  const minSubsRaw   = url.searchParams.get("minSubs");
+  const minMrr       = minMrrRaw  !== null && minMrrRaw  !== "" ? Number(minMrrRaw)  : null;
+  const minSubs      = minSubsRaw !== null && minSubsRaw !== "" ? Number(minSubsRaw) : null;
+
+  const activeFilters = {
+    status:  statusFilter,
+    range:   rangeFilter,
+    minMrr:  minMrrRaw  ?? "",
+    minSubs: minSubsRaw ?? "",
+  };
 
   // ── Search mode — live from Shopify API ──────────────────────
   if (q && q.length >= 2) {
@@ -90,7 +106,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
       mrr:            0,
       totalCollected: 0,
       lastSubDate:    null,
+      lastSubAt:      null,
     }));
+    // Search results come straight from the Shopify API with no local stats
+    // (totalSubs/activeSubs/mrr are all 0), so the filters cannot be applied
+    // meaningfully here — the UI disables the chips while searching.
     return json({
       customers: customers as CustomerRow[],
       total:      customers.length,
@@ -98,25 +118,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
       totalPages: 1,
       stats:      null,
       searchMode: true,
+      filters:    activeFilters,
     });
   }
 
   // ── List mode — from local DB ────────────────────────────────
+  // Status/MRR/date are derived from aggregates rather than stored columns, so
+  // the full set is built first, then filtered, then paginated. Fine at current
+  // scale; revisit if customer counts grow (this loop is already ~4 queries each).
   const rawCustomers = await prisma.subscription.groupBy({
     by:      ["customerId", "customerEmail"],
     where:   { shop: session.shop },
     _count:  { id: true },
     orderBy: { _count: { id: "desc" } },
-    skip,
-    take:    PAGE_SIZE,
   });
 
-  const total = await prisma.subscription
-    .groupBy({ by: ["customerId"], where: { shop: session.shop } })
-    .then((r) => r.length);
-
   // ── Per-customer stats ───────────────────────────────────────
-  const customers: CustomerRow[] = await Promise.all(
+  const allCustomers: CustomerRow[] = await Promise.all(
     rawCustomers.map(async (c) => {
       const [activeSubs, lastSub, activePlans, collectedAgg] = await Promise.all([
         // active sub count
@@ -164,9 +182,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
               day: "2-digit", month: "short", year: "numeric",
             })
           : null,
+        // Raw timestamp for the date-range filter — lastSubDate above is
+        // already formatted for display and cannot be compared reliably.
+        lastSubAt:      lastSub?.createdAt ? new Date(lastSub.createdAt).getTime() : null,
       };
     }),
   );
+
+  // ── Apply filters, then paginate the filtered set ────────────
+  const rangeDays  = rangeFilter ? Number(rangeFilter) : null;
+  const rangeStart = rangeDays && Number.isFinite(rangeDays)
+    ? Date.now() - rangeDays * 24 * 60 * 60 * 1000
+    : null;
+
+  const filtered = allCustomers.filter((c) => {
+    if (statusFilter && customerStatus(c.activeSubs, c.totalSubs) !== statusFilter) return false;
+    if (rangeStart !== null && (c.lastSubAt === null || c.lastSubAt < rangeStart)) return false;
+    if (minMrr  !== null && Number.isFinite(minMrr)  && c.mrr       < minMrr)  return false;
+    if (minSubs !== null && Number.isFinite(minSubs) && c.totalSubs < minSubs) return false;
+    return true;
+  });
+
+  const total     = filtered.length;
+  const customers = filtered.slice(skip, skip + PAGE_SIZE);
 
   // ── Global stats ─────────────────────────────────────────────
   const uniqueActive = await prisma.subscription
@@ -193,10 +231,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     customers,
     total,
     page,
-    totalPages: Math.ceil(total / PAGE_SIZE),
+    totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
     searchMode: false,
+    filters:    activeFilters,
     stats: {
-      totalCustomers:  total,
+      // Global figures — deliberately NOT filtered. These cards are labelled
+      // "All time" / "Lifetime revenue", so they describe the whole shop.
+      totalCustomers:  allCustomers.length,
       activeCustomers: uniqueActive,
       combinedMrr,
       totalCollected:  totalCollectedAgg._sum.amount ?? 0,
@@ -259,12 +300,25 @@ function avatarInitials(row: CustomerRow): string {
   return "?";
 }
 
+// Single source of truth for how a customer is classified. Used by both the
+// pill below and the loader's status filter so the two can never disagree.
+type CustomerStatus = "active" | "partial" | "inactive";
+
+function customerStatus(activeSubs: number, totalSubs: number): CustomerStatus {
+  if (activeSubs === totalSubs && totalSubs > 0) return "active";
+  if (activeSubs === 0) return "inactive";
+  return "partial";
+}
+
 function statusPill(activeSubs: number, totalSubs: number) {
-  if (activeSubs === totalSubs && totalSubs > 0)
-    return { label: "Active",   bg: T.greenBg, color: T.greenFg, dot: T.greenDot };
-  if (activeSubs === 0)
-    return { label: "Inactive", bg: T.redBg,   color: T.redFg,   dot: "#E24B4A"  };
-  return   { label: "Partial",  bg: T.amberBg, color: T.amberFg, dot: T.amberDot };
+  switch (customerStatus(activeSubs, totalSubs)) {
+    case "active":
+      return { label: "Active",   bg: T.greenBg, color: T.greenFg, dot: T.greenDot };
+    case "inactive":
+      return { label: "Inactive", bg: T.redBg,   color: T.redFg,   dot: "#E24B4A"  };
+    default:
+      return { label: "Partial",  bg: T.amberBg, color: T.amberFg, dot: T.amberDot };
+  }
 }
 
 const AVATAR_COLORS = [
@@ -321,11 +375,50 @@ function MetricCard({
 
 // ─── Component ────────────────────────────────────────────────
 export default function Customers() {
-  const { customers, total, page, totalPages, stats, searchMode } =
+  const { customers, total, page, totalPages, stats, searchMode, filters } =
     useLoaderData<typeof loader>();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [searchInput, setSearchInput] = useState(params.get("q") ?? "");
+
+  // ── Filter dropdowns ────────────────────────────────────────
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [rangeOpen,  setRangeOpen]  = useState(false);
+  const [moreOpen,   setMoreOpen]   = useState(false);
+  const [minMrrInput,  setMinMrrInput]  = useState(filters?.minMrr  ?? "");
+  const [minSubsInput, setMinSubsInput] = useState(filters?.minSubs ?? "");
+
+  const closeAllMenus = useCallback(() => {
+    setStatusOpen(false); setRangeOpen(false); setMoreOpen(false);
+  }, []);
+
+  // Escape closes any open dropdown
+  useEffect(() => {
+    if (!statusOpen && !rangeOpen && !moreOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeAllMenus(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [statusOpen, rangeOpen, moreOpen, closeAllMenus]);
+
+  const STATUS_OPTIONS = [
+    { value: "",         label: "All statuses" },
+    { value: "active",   label: "Active"       },
+    { value: "partial",  label: "Partial"      },
+    { value: "inactive", label: "Inactive"     },
+  ];
+  const RANGE_OPTIONS = [
+    { value: "",    label: "All time"       },
+    { value: "30",  label: "Last 30 days"   },
+    { value: "90",  label: "Last 90 days"   },
+    { value: "365", label: "Last 12 months" },
+  ];
+
+  const activeStatus = filters?.status ?? "";
+  const activeRange  = filters?.range  ?? "";
+  const statusLabel  = STATUS_OPTIONS.find((o) => o.value === activeStatus)?.label ?? "Status";
+  const rangeLabel   = RANGE_OPTIONS.find((o) => o.value === activeRange)?.label   ?? "All time";
+  const moreCount    = (filters?.minMrr ? 1 : 0) + (filters?.minSubs ? 1 : 0);
+  const anyFilter    = !!(activeStatus || activeRange || filters?.minMrr || filters?.minSubs);
 
   // ── Add-customer modal ──────────────────────────────────────
   const createFetcher = useFetcher<{ ok: boolean; error?: string; email?: string }>();
@@ -333,7 +426,8 @@ export default function Customers() {
   const [newEmail,  setNewEmail]  = useState("");
   const [newFirst,  setNewFirst]  = useState("");
   const [newLast,   setNewLast]   = useState("");
-  const [toast,     setToast]     = useState<string | null>(null);
+  const [toast,     setToast]     = useState<{ msg: string; tone: "success" | "critical" } | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   const creating   = createFetcher.state !== "idle";
   const createError = createFetcher.data && !createFetcher.data.ok
@@ -345,7 +439,7 @@ export default function Customers() {
     if (createFetcher.state === "idle" && createFetcher.data?.ok) {
       setAddOpen(false);
       setNewEmail(""); setNewFirst(""); setNewLast("");
-      setToast(`Customer ${createFetcher.data.email ?? ""} created in Shopify.`);
+      setToast({ msg: `Customer ${createFetcher.data.email ?? ""} created in Shopify.`, tone: "success" });
     }
   }, [createFetcher.state, createFetcher.data]);
 
@@ -355,6 +449,40 @@ export default function Customers() {
       { method: "post" },
     );
   }, [createFetcher, newEmail, newFirst, newLast]);
+
+  // ── CSV export ──────────────────────────────────────────────
+  // Must be an in-page fetch, NOT window.open: App Bridge attaches the Shopify
+  // session token to same-origin fetches, but a new tab carries no token and
+  // authenticate.admin() bounces it to the login page.
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    try {
+      const res = await fetch("/app/customers/export");
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+
+      // Prefer the filename the server set; fall back to a constructed one.
+      const cd       = res.headers.get("Content-Disposition") ?? "";
+      const match    = cd.match(/filename="?([^"]+)"?/);
+      const filename = match?.[1] ?? `customers-${new Date().toISOString().slice(0, 10)}.csv`;
+
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setToast({
+        msg:  err instanceof Error ? err.message : "Export failed.",
+        tone: "critical",
+      });
+    } finally {
+      setExporting(false);
+    }
+  }, []);
 
   const goTo = useCallback(
     (updates: Record<string, string>) => {
@@ -433,15 +561,19 @@ export default function Customers() {
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             <button
               type="button"
-              onClick={() => window.open("/app/customers/export", "_blank")}
+              onClick={handleExport}
+              disabled={exporting}
               style={{
                 fontSize: "13px", padding: "8px 16px",
                 border: "0.5px solid var(--p-color-border-secondary)",
                 borderRadius: "9px", background: "var(--p-color-bg-surface)",
-                color: "var(--p-color-text)", cursor: "pointer", fontWeight: 500,
+                color: "var(--p-color-text)",
+                cursor: exporting ? "not-allowed" : "pointer",
+                opacity: exporting ? 0.6 : 1,
+                fontWeight: 500,
               }}
             >
-              Export
+              {exporting ? "Exporting…" : "Export"}
             </button>
             <button
               type="button"
@@ -553,33 +685,213 @@ export default function Customers() {
               )}
             </div>
 
-            {/* Filter chips */}
-            {[
-              { label: "Status",       active: !!params.get("status") },
-              { label: "All time",     active: false },
-              { label: "More filters", active: false },
-            ].map((chip) => (
-              <button
-                key={chip.label}
-                style={{
-                  fontSize:     "12px",
-                  padding:      "7px 13px",
-                  border:       `0.5px solid ${chip.active ? T.purple : "var(--p-color-border-secondary)"}`,
-                  borderRadius: "20px",
-                  background:   chip.active ? T.purpleBg : "var(--p-color-bg-surface)",
-                  color:        chip.active ? T.purpleFg : "var(--p-color-text-subdued)",
-                  cursor:       "pointer",
-                  fontWeight:   500,
-                  whiteSpace:   "nowrap",
-                  display:      "flex",
-                  alignItems:   "center",
-                  gap:          "4px",
-                }}
-              >
-                {chip.label}
-                <span style={{ fontSize: "10px" }}>▾</span>
-              </button>
-            ))}
+            {/* Filter chips — disabled while searching, since search results
+                come from the Shopify API with no local stats to filter on. */}
+            {(() => {
+              const chipStyle = (active: boolean): React.CSSProperties => ({
+                fontSize:     "12px",
+                padding:      "7px 13px",
+                border:       `0.5px solid ${active ? T.purple : "var(--p-color-border-secondary)"}`,
+                borderRadius: "20px",
+                background:   active ? T.purpleBg : "var(--p-color-bg-surface)",
+                color:        active ? T.purpleFg : "var(--p-color-text-subdued)",
+                cursor:       searchMode ? "not-allowed" : "pointer",
+                opacity:      searchMode ? 0.5 : 1,
+                fontWeight:   500,
+                whiteSpace:   "nowrap",
+                display:      "flex",
+                alignItems:   "center",
+                gap:          "4px",
+              });
+              const menuStyle: React.CSSProperties = {
+                position:     "absolute",
+                left:         0,
+                top:          "calc(100% + 6px)",
+                minWidth:     "180px",
+                background:   "var(--p-color-bg-surface)",
+                border:       "0.5px solid var(--p-color-border)",
+                borderRadius: "10px",
+                boxShadow:    "0 6px 20px rgba(0,0,0,0.08)",
+                padding:      "4px",
+                zIndex:       40,
+              };
+              const itemStyle = (current: boolean): React.CSSProperties => ({
+                width:        "100%",
+                textAlign:    "left",
+                padding:      "8px 12px",
+                fontSize:     "13px",
+                color:        current ? T.purpleFg : "var(--p-color-text)",
+                fontWeight:   current ? 500 : 400,
+                background:   current ? T.purpleBg : "transparent",
+                border:       "none",
+                borderRadius: "7px",
+                cursor:       "pointer",
+              });
+
+              return (
+                <>
+                  {/* Status */}
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      disabled={searchMode}
+                      onClick={() => { const n = !statusOpen; closeAllMenus(); setStatusOpen(n); }}
+                      style={chipStyle(!!activeStatus)}
+                    >
+                      {statusLabel}
+                      <span style={{ fontSize: "10px" }}>▾</span>
+                    </button>
+                    {statusOpen && (
+                      <div style={menuStyle}>
+                        {STATUS_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value || "all"}
+                            type="button"
+                            onClick={() => { closeAllMenus(); goTo({ status: opt.value, page: "1" }); }}
+                            style={itemStyle(opt.value === activeStatus)}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Date range */}
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      disabled={searchMode}
+                      onClick={() => { const n = !rangeOpen; closeAllMenus(); setRangeOpen(n); }}
+                      style={chipStyle(!!activeRange)}
+                    >
+                      {rangeLabel}
+                      <span style={{ fontSize: "10px" }}>▾</span>
+                    </button>
+                    {rangeOpen && (
+                      <div style={menuStyle}>
+                        {RANGE_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.value || "all"}
+                            type="button"
+                            onClick={() => { closeAllMenus(); goTo({ range: opt.value, page: "1" }); }}
+                            style={itemStyle(opt.value === activeRange)}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* More filters */}
+                  <div style={{ position: "relative" }}>
+                    <button
+                      type="button"
+                      disabled={searchMode}
+                      onClick={() => { const n = !moreOpen; closeAllMenus(); setMoreOpen(n); }}
+                      style={chipStyle(moreCount > 0)}
+                    >
+                      {moreCount > 0 ? `More filters (${moreCount})` : "More filters"}
+                      <span style={{ fontSize: "10px" }}>▾</span>
+                    </button>
+                    {moreOpen && (
+                      <div style={{ ...menuStyle, minWidth: "230px", padding: "12px" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                          <label style={{ fontSize: "12px", color: "var(--p-color-text-subdued)" }}>
+                            Minimum MRR ($)
+                            <input
+                              type="number" min="0" step="0.01"
+                              value={minMrrInput}
+                              onChange={(e) => setMinMrrInput(e.target.value)}
+                              placeholder="e.g. 50"
+                              style={{
+                                width: "100%", marginTop: "4px", padding: "6px 8px",
+                                border: "0.5px solid var(--p-color-border-secondary)",
+                                borderRadius: "7px", fontSize: "13px",
+                                background: "var(--p-color-bg-surface)",
+                                color: "var(--p-color-text)", outline: "none",
+                                boxSizing: "border-box",
+                              }}
+                            />
+                          </label>
+                          <label style={{ fontSize: "12px", color: "var(--p-color-text-subdued)" }}>
+                            Minimum subscriptions
+                            <input
+                              type="number" min="0" step="1"
+                              value={minSubsInput}
+                              onChange={(e) => setMinSubsInput(e.target.value)}
+                              placeholder="e.g. 2"
+                              style={{
+                                width: "100%", marginTop: "4px", padding: "6px 8px",
+                                border: "0.5px solid var(--p-color-border-secondary)",
+                                borderRadius: "7px", fontSize: "13px",
+                                background: "var(--p-color-bg-surface)",
+                                color: "var(--p-color-text)", outline: "none",
+                                boxSizing: "border-box",
+                              }}
+                            />
+                          </label>
+                          <div style={{ display: "flex", gap: "8px", marginTop: "2px" }}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                closeAllMenus();
+                                goTo({ minMrr: minMrrInput, minSubs: minSubsInput, page: "1" });
+                              }}
+                              style={{
+                                flex: 1, padding: "7px", borderRadius: "8px", border: "none",
+                                background: T.purpleDark, color: "#fff",
+                                fontSize: "12px", fontWeight: 600, cursor: "pointer",
+                              }}
+                            >
+                              Apply
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMinMrrInput(""); setMinSubsInput("");
+                                closeAllMenus();
+                                goTo({ minMrr: "", minSubs: "", page: "1" });
+                              }}
+                              style={{
+                                flex: 1, padding: "7px", borderRadius: "8px",
+                                border: "0.5px solid var(--p-color-border-secondary)",
+                                background: "var(--p-color-bg-surface)",
+                                color: "var(--p-color-text)",
+                                fontSize: "12px", fontWeight: 500, cursor: "pointer",
+                              }}
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clear all — only when something is filtering */}
+                  {anyFilter && !searchMode && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMinMrrInput(""); setMinSubsInput("");
+                        closeAllMenus();
+                        goTo({ status: "", range: "", minMrr: "", minSubs: "", page: "1" });
+                      }}
+                      style={{
+                        fontSize: "12px", padding: "7px 13px",
+                        border: "none", background: "none",
+                        color: T.purpleFg, cursor: "pointer",
+                        fontWeight: 500, whiteSpace: "nowrap",
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </>
+              );
+            })()}
 
             {searchMode && (
               <button
@@ -932,10 +1244,10 @@ export default function Customers() {
         </Modal.Section>
       </Modal>
 
-      {/* Success confirmation */}
+      {/* Confirmation / error toast */}
       {toast && (
         <div style={{ position: "fixed", bottom: "20px", left: "50%", transform: "translateX(-50%)", zIndex: 600, minWidth: "320px" }}>
-          <Banner tone="success" onDismiss={() => setToast(null)}>{toast}</Banner>
+          <Banner tone={toast.tone} onDismiss={() => setToast(null)}>{toast.msg}</Banner>
         </div>
       )}
     </Page>
