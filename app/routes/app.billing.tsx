@@ -137,7 +137,6 @@ export default function BillingPage() {
   const { currentPlan } = useLoaderData<typeof loader>();
   const actionData      = useActionData<typeof action>() as ActionData | undefined;
   const navigation      = useNavigation();
-  const [billingCycle, setBillingCycle] = useState<"monthly" | "yearly">("monthly");
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
 
@@ -159,8 +158,7 @@ export default function BillingPage() {
   }, [actionData]);
 
   function displayPrice(price: number) {
-    const p = billingCycle === "yearly" ? price * 0.8 : price;
-    return p % 1 === 0 ? `$${p.toFixed(2)}` : `$${p.toFixed(2)}`;
+    return `$${price.toFixed(2)}`;
   }
 
   const btn: React.CSSProperties = {
@@ -231,48 +229,6 @@ export default function BillingPage() {
                 : "Upgrade anytime to unlock more features for your store."}
             </Text>
           </div>
-        </div>
-
-        {/* ── Billing cycle toggle ─────────────────────────────── */}
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <div style={{
-            display: "inline-flex", borderRadius: "8px",
-            border: "0.5px solid var(--p-color-border-secondary)",
-            overflow: "hidden",
-          }}>
-            {(["monthly", "yearly"] as const).map((cycle) => (
-              <button
-                key={cycle}
-                onClick={() => setBillingCycle(cycle)}
-                style={{
-                  padding: "7px 18px", fontSize: "13px", fontWeight: 500,
-                  border: "none", cursor: "pointer",
-                  background: billingCycle === cycle ? T.purpleDark : "var(--p-color-bg-surface)",
-                  color: billingCycle === cycle ? "#fff" : "var(--p-color-text-subdued)",
-                  transition: "all 0.15s",
-                }}
-              >
-                {cycle.charAt(0).toUpperCase() + cycle.slice(1)}
-              </button>
-            ))}
-          </div>
-          {billingCycle === "yearly" && (
-            <span style={{
-              fontSize: "12px", fontWeight: 600, padding: "3px 10px",
-              borderRadius: "20px", background: T.greenBg, color: T.greenFg,
-              display: "inline-flex", alignItems: "center", gap: "4px",
-            }}>
-              Save up to 20% ↓
-            </span>
-          )}
-          {billingCycle === "monthly" && (
-            <span style={{
-              fontSize: "12px", fontWeight: 500, color: "var(--p-color-text-subdued)",
-              display: "inline-flex", alignItems: "center", gap: "4px",
-            }}>
-              Save up to 20% ↓
-            </span>
-          )}
         </div>
 
         {/* ── Plan cards ───────────────────────────────────────── */}
