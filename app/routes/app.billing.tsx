@@ -56,13 +56,14 @@ const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(B
 //           activates, NO real money moves. Correct for development stores.
 //   false → REAL charge. Merchants are actually billed. Production only.
 //
-// This is a compile-time constant: esbuild inlines it, so changing it requires
+// The value is fixed when the bundle is built, so changing it requires
 // `npm run build` AND a process restart before the running server picks it up.
+// Editing this file alone has no effect on an already-running server.
 //
 // NOTE: this file (app/routes/app.billing.tsx) is the ONLY billing page Remix
 // loads. app/app.billing.tsxeses is a dead copy; editing it has no effect on
 // the running app.
-const BILLING_TEST_MODE = false;
+const BILLING_TEST_MODE = true;
 
 // ─── Loader ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
