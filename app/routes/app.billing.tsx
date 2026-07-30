@@ -34,7 +34,7 @@ const T = {
 };
 
 // ─── Types ────────────────────────────────────────────────────
-interface LoaderData { currentPlan: string; billingTestMode: boolean }
+interface LoaderData { currentPlan: string }
 interface ActionData { confirmationUrl?: string; error?: string }
 interface UserError  { field: string; message: string }
 interface AppSubscriptionCreateResponse {
@@ -49,11 +49,15 @@ interface AppSubscriptionCreateResponse {
 
 const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(Boolean);
 
-// ─── Billing mode ─────────────────────────────────────────────
-// true  → charges are created in Shopify TEST mode (no real money moves)
-// false → upgrade flow is LOCKED: buttons disabled AND the server refuses
-//         to create a charge. Going live means removing this guard, not
-//         just flipping the flag — otherwise nobody can ever subscribe.
+// ─── Shopify charge mode ──────────────────────────────────────
+// Controls the `test` argument on appSubscriptionCreate. Nothing else.
+//
+//   true  → TEST charge. Merchant sees the approval screen, subscription
+//           activates, NO real money moves. Correct for development stores.
+//   false → REAL charge. Merchants are actually billed. Production only.
+//
+// This is a compile-time constant: esbuild inlines it, so changing it requires
+// `npm run build` AND a process restart before the running server picks it up.
 //
 // NOTE: this file (app/routes/app.billing.tsx) is the ONLY billing page Remix
 // loads. app/app.billing.tsxeses is a dead copy; editing it has no effect on
@@ -64,7 +68,7 @@ const BILLING_TEST_MODE = false;
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const record      = await getShopPlanFromDB(session.shop);
-  return { currentPlan: record.plan, billingTestMode: BILLING_TEST_MODE } satisfies LoaderData;
+  return { currentPlan: record.plan } satisfies LoaderData;
 };
 
 // ─── Action ───────────────────────────────────────────────────
@@ -76,13 +80,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (!PLAN_KEYS.includes(planKey))
     return { error: `Invalid plan: "${planKey}"` } satisfies ActionData;
-
-  // Server-side lock. The disabled buttons are cosmetic and bypassable —
-  // this is the check that actually prevents a charge being created.
-  if (!BILLING_TEST_MODE)
-    return {
-      error: "Billing is locked. Set BILLING_TEST_MODE = true in app/routes/app.billing.tsx to enable the upgrade flow.",
-    } satisfies ActionData;
 
   const selectedPlan = PLANS[planKey];
 
@@ -152,7 +149,7 @@ const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
 
 // ─── Page ─────────────────────────────────────────────────────
 export default function BillingPage() {
-  const { currentPlan, billingTestMode } = useLoaderData<typeof loader>();
+  const { currentPlan } = useLoaderData<typeof loader>();
   const actionData      = useActionData<typeof action>() as ActionData | undefined;
   const navigation      = useNavigation();
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
@@ -358,22 +355,18 @@ export default function BillingPage() {
                       <button
                         type="submit"
                         onClick={() => setSubmittingPlan(plan.key)}
-                        disabled={isSubmitting || !!actionData?.confirmationUrl || !billingTestMode}
+                        disabled={isSubmitting || !!actionData?.confirmationUrl}
                         style={{
                           width: "100%", padding: "9px", borderRadius: "9px",
                           fontSize: "13px", fontWeight: 600,
                           border: plan.popular ? "none" : `0.5px solid var(--p-color-border-secondary)`,
                           background: plan.popular ? T.purpleDark : "var(--p-color-bg-surface)",
                           color:      plan.popular ? "#fff" : "var(--p-color-text)",
-                          cursor: (isSubmitting || !billingTestMode) ? "not-allowed" : "pointer",
-                          opacity: !billingTestMode
-                            ? 0.5
-                            : isSubmitting && submittingPlan !== plan.key ? 0.6 : 1,
+                          cursor: isSubmitting ? "not-allowed" : "pointer",
+                          opacity: isSubmitting && submittingPlan !== plan.key ? 0.6 : 1,
                         }}
                       >
-                        {!billingTestMode
-                          ? "🔒 Billing locked"
-                          : isSubmitting && submittingPlan === plan.key
+                        {isSubmitting && submittingPlan === plan.key
                           ? "Processing…"
                           : currentPlanPrice > plan.price
                           ? `Downgrade to ${plan.label}`
