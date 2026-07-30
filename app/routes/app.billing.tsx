@@ -63,7 +63,7 @@ const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(B
 // NOTE: this file (app/routes/app.billing.tsx) is the ONLY billing page Remix
 // loads. app/app.billing.tsxeses is a dead copy; editing it has no effect on
 // the running app.
-const BILLING_TEST_MODE = true;
+const BILLING_TEST_MODE = false;
 
 // ─── Loader ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
