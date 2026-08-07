@@ -1,7 +1,7 @@
 // app/routes/app._index.tsx
 
 import type { LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useNavigate, useFetcher } from "@remix-run/react";
+import { useLoaderData, useNavigate, useFetcher, useNavigation, useRevalidator } from "@remix-run/react";
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
   Page,
@@ -1477,7 +1477,29 @@ function ContractsTable({ contracts }: { contracts: ShapedContract[] }) {
 
 export default function Index() {
   const { stats, contracts, fetchError } = useLoaderData<typeof loader>();
-  const navigate = useNavigate();
+  const navigate    = useNavigate();
+  const navigation  = useNavigation();
+  const revalidator = useRevalidator();
+
+  // Real sync time for the footer. It used to be the hardcoded words "just
+  // now", which claimed the data was fresh however long the page had been open.
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date>(new Date());
+
+  useEffect(() => {
+    if (navigation.state === "idle" && revalidator.state === "idle") {
+      setLastSyncedAt(new Date());
+    }
+  }, [contracts, navigation.state, revalidator.state]);
+
+  // Same shape as the one on app.subscriptions.tsx. Kept local rather than
+  // extracted so this fix does not touch that page, which already works.
+  function timeAgo(d: Date) {
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (diff < 5)    return "just now";
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return `${Math.floor(diff / 3600)}h ago`;
+  }
 
   const safeTotal      = stats.total || 1;
   const activeRatio    = Math.round((stats.active    / safeTotal) * 100);
@@ -1824,11 +1846,13 @@ export default function Index() {
                 {IconInfo}
               </div>
               <Text as="p" variant="bodySm">
-                All subscription data is synced in real-time from Shopify. Last synced just now.
+                All subscription data is synced in real-time from Shopify. Last synced {timeAgo(lastSyncedAt)}.
               </Text>
             </InlineStack>
             <button
               type="button"
+              onClick={() => revalidator.revalidate()}
+              disabled={revalidator.state === "loading"}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -1840,15 +1864,30 @@ export default function Index() {
                 fontSize: "13px",
                 fontWeight: 500,
                 color: "var(--p-color-text)",
-                cursor: "pointer",
+                cursor: revalidator.state === "loading" ? "wait" : "pointer",
+                opacity: revalidator.state === "loading" ? 0.7 : 1,
                 flexShrink: 0,
               }}
             >
-              {IconRefresh}
+              <span
+                style={{
+                  display: "inline-flex",
+                  animation: revalidator.state === "loading" ? "spin 1s linear infinite" : "none",
+                }}
+              >
+                {IconRefresh}
+              </span>
               Refresh now
             </button>
           </InlineStack>
         </div>
+
+        <style>{`
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+          }
+        `}</style>
 
       </BlockStack>
     </Page>

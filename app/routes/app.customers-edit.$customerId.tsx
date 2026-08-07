@@ -437,7 +437,7 @@ export default function CustomerDetail() {
                           onMouseEnter={(e) => (e.currentTarget.style.background = "var(--p-color-bg-surface-hover)")}
                           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                           style={{ transition: "background 0.1s", cursor: "pointer" }}
-                          onClick={() => navigate(`/app/subscriptions/${s.id}`)}
+                          onClick={() => navigate(`/app/subscriptions-edit/${s.id}`)}
                         >
                           <td style={{ ...cell, fontWeight: 500 }}>
                             <IconCell icon={<CellIcon icon={IconBox} color={rowColorFor(s.id)} />}>
@@ -459,7 +459,7 @@ export default function CustomerDetail() {
                           </td>
                           <td style={{ ...cell, overflow: "visible" }} onClick={(e) => e.stopPropagation()}>
                             <button
-                              onClick={() => navigate(`/app/subscriptions/${s.id}`)}
+                              onClick={() => navigate(`/app/subscriptions-edit/${s.id}`)}
                               style={{
                                 fontSize: "12px", padding: "5px 10px",
                                 border: "0.5px solid var(--p-color-border-secondary)",
@@ -467,7 +467,7 @@ export default function CustomerDetail() {
                                 color: "var(--p-color-text)", cursor: "pointer",
                               }}
                             >
-                              View →
+                              Edit →
                             </button>
                           </td>
                         </tr>
