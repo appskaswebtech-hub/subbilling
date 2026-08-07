@@ -2,33 +2,35 @@
 
 import { json } from "@remix-run/node";
 import prisma from "../db.server";
-
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin":  "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Content-Type":                 "application/json",
-  };
-}
+import {
+  assertOwnsContract,
+  authenticateCustomer,
+  corsHeaders,
+  toContractGid,
+} from "../lib/customer-auth.server";
 
 export async function loader({ request }) {
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
+    return new Response(null, { status: 204, headers: corsHeaders("GET, OPTIONS") });
   }
+
+  // Shop and customer come from the verified session token, not the query
+  // string — this used to serve any shop's billing history to any caller.
+  const ctx = await authenticateCustomer(request);
 
   const url        = new URL(request.url);
   const contractId = url.searchParams.get("contractId");
-  const shop       = url.searchParams.get("shop");
 
-  if (!contractId || !shop) {
-    return json({ error: "Missing contractId or shop" }, { status: 400, headers: corsHeaders() });
+  if (!contractId) {
+    return json({ error: "Missing contractId" }, { status: 400, headers: corsHeaders("GET, OPTIONS") });
   }
+
+  await assertOwnsContract(ctx, toContractGid(contractId));
 
   // Find subscription by shopifyContractId (short ID or full GID)
   const subscription = await prisma.subscription.findFirst({
     where: {
-      shop,
+      shop: ctx.shop,
       OR: [
         { shopifyContractId: contractId },
         { shopifyContractId: `gid://shopify/SubscriptionContract/${contractId}` },

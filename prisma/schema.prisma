@@ -62,6 +62,7 @@ model Subscription {
 
   @@index([shop])
   @@index([status])
+  @@index([shop, customerId])
 }
 
 model BillingAttempt {

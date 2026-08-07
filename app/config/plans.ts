@@ -15,7 +15,7 @@ export const PLANS: Record<string, Plan> = {
     key:       "basic",
     label:     "Basic",
     price:     9.99,
-    trialDays: 0,
+    trialDays: 7,
     color:     "#f6f6f7",
     popular:   false,
     features: [
@@ -29,7 +29,7 @@ export const PLANS: Record<string, Plan> = {
     key:       "pro",
     label:     "Pro",
     price:     30,
-    trialDays: 0,
+    trialDays: 7,
     color:     "#f0f4ff",
     popular:   true,
     features: [
@@ -43,7 +43,7 @@ export const PLANS: Record<string, Plan> = {
     key:       "advanced",
     label:     "Advanced",
     price:     40,
-    trialDays: 0,
+    trialDays: 7,
     color:     "#f3f0ff",
     popular:   false,
     features: [

@@ -14,14 +14,23 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { IconCell, CellIcon, IconCalendar } from "../components/TableIcons";
+import SubscriptionEditForm from "../components/SubscriptionEditForm";
+import {
+  SUBSCRIPTION_CONTRACT_QUERY,
+  contractRevision,
+  toContractGid as toFullGid,
+  type ShopifyContract,
+} from "../lib/subscription-sync.server";
+import { handleContractEdit } from "../lib/subscription-edit.server";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
-// ─── GID helper ──────────────────────────────────────────────
-// Shopify mutations REQUIRE the full GID: gid://shopify/SubscriptionContract/123
-// If stored as just "123" or "SubscriptionContract/123" this ensures the full GID
-function toFullGid(raw: string): string {
+// Everything imported from a .server module above is referenced ONLY inside
+// the loader and action bodies. Remix strips those two exports from the client
+// bundle; anything the component touches must be client-safe, hence the local
+// display-only copy below rather than reusing toContractGid.
+function displayGid(raw: string): string {
   if (raw.startsWith("gid://")) return raw;
-  if (raw.includes("/")) return `gid://shopify/${raw}`;
+  if (raw.includes("/"))        return `gid://shopify/${raw}`;
   return `gid://shopify/SubscriptionContract/${raw}`;
 }
 
@@ -81,7 +90,7 @@ const T = {
 
 // ─── Loader ───────────────────────────────────────────────────
 export async function loader({ request, params }: LoaderFunctionArgs) {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
 
   const subscription = await prisma.subscription.findFirst({
     where:   { id: params.id, shop: session.shop },
@@ -89,15 +98,58 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   });
 
   if (!subscription) throw new Response("Not found", { status: 404 });
-  return json({ subscription });
+
+  // Line ids live only in Shopify — the local model has no line data — so the
+  // edit form needs the live contract. If Shopify is unreachable the page must
+  // still render read-only rather than blowing up.
+  let contract: ShopifyContract | null = null;
+  let contractError: string | null     = null;
+  try {
+    const res    = await admin.graphql(SUBSCRIPTION_CONTRACT_QUERY, {
+      variables: { id: toFullGid(subscription.shopifyContractId) },
+    });
+    const result = await res.json() as any;
+    if (result?.errors?.length) {
+      contractError = result.errors.map((e: any) => e.message).join(" | ");
+    } else {
+      contract = result?.data?.subscriptionContract ?? null;
+      if (!contract) contractError = "Shopify returned no contract for this subscription.";
+    }
+  } catch (err) {
+    contractError = err instanceof Error ? err.message : "Could not reach Shopify.";
+  }
+
+  // Editing mid-charge can bill the same cycle twice — the cron advances
+  // nextBillingDate before it creates the attempt.
+  const pendingAttempts = await prisma.billingAttempt.count({
+    where: { subscriptionId: subscription.id, status: "PENDING" },
+  });
+
+  return json({
+    subscription,
+    contract,
+    contractError,
+    revision:          contractRevision(contract),
+    hasPendingAttempt: pendingAttempts > 0,
+  });
 }
 
 // ─── Action ───────────────────────────────────────────────────
 export async function action({ request, params }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const formData           = await request.formData();
-  const intent             = formData.get("intent") as Intent;
+  const rawIntent          = formData.get("intent") as string;
 
+  // Draft-flow edits. Handled before the pause/resume/cancel guard below,
+  // which rejects anything not in OPERATIONS.
+  if (rawIntent === "update-contract" || rawIntent === "preview-contract") {
+    return handleContractEdit({
+      graphql: admin.graphql, shop: session.shop, localId: params.id!, formData,
+      commit: rawIntent === "update-contract",
+    });
+  }
+
+  const intent = rawIntent as Intent;
 
   if (!OPERATIONS[intent])
     return json({ error: `Unknown intent: ${intent}` }, { status: 400 });
@@ -285,7 +337,8 @@ function SectionCard({ title, icon, children }: { title: string; icon?: string; 
 
 // ─── Component ────────────────────────────────────────────────
 export default function SubscriptionDetail() {
-  const { subscription } = useLoaderData<typeof loader>();
+  const { subscription, contract, contractError, revision, hasPendingAttempt } =
+    useLoaderData<typeof loader>();
   const actionData        = useActionData<typeof action>();
   const submit            = useSubmit();
   const navigation        = useNavigation();
@@ -293,6 +346,15 @@ export default function SubscriptionDetail() {
   const isSubmitting = navigation.state === "submitting";
   const activeIntent = navigation.formData?.get("intent") as string | undefined;
   const s            = subscription;
+
+  const editLines   = contract?.lines?.edges?.map((e: any) => e.node) ?? [];
+  const isEditing   = activeIntent === "update-contract" || activeIntent === "preview-contract";
+  const editDisabled = s.status === "CANCELLED" || hasPendingAttempt || !contract;
+  const editNote =
+    !contract       ? `Live contract data is unavailable, so editing is off. ${contractError ?? ""}`
+    : hasPendingAttempt ? "A billing attempt is in progress — editing is locked until it settles."
+    : s.status === "CANCELLED" ? "This subscription is cancelled and can no longer be edited."
+    : null;
 
   function doAction(intent: Intent) {
     const fd = new FormData();
@@ -467,6 +529,22 @@ export default function SubscriptionDetail() {
           </div>
         )}
 
+        {actionData && "ok" in actionData && (actionData as any).ok && (
+          <div style={{ background: T.greenBg, border: `0.5px solid ${T.greenDot}`, borderRadius: "12px", padding: "14px 16px", display: "flex", gap: "10px", alignItems: "flex-start" }}>
+            <span style={{ fontSize: "16px", flexShrink: 0 }}>✅</span>
+            <div>
+              <Text as="p" variant="bodyMd" fontWeight="semibold">
+                {(actionData as any).preview ? "Preview only — nothing was saved" : "Subscription updated"}
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                {(actionData as any).preview
+                  ? "Shopify accepted these changes as a draft and discarded it. The customer was not affected."
+                  : "Shopify committed the change and the local record now mirrors it."}
+              </Text>
+            </div>
+          </div>
+        )}
+
         {s.status === "CANCELLED" && (
           <div style={{ background: T.redBg, border: `0.5px solid ${T.redBorder}`, borderRadius: "12px", padding: "12px 16px", display: "flex", gap: "10px", alignItems: "center" }}>
             <span>🚫</span>
@@ -520,6 +598,19 @@ export default function SubscriptionDetail() {
               <DetailRowLast label="Last updated">
                 <Text as="span" variant="bodySm" tone="subdued">{fmt(s.updatedAt)}</Text>
               </DetailRowLast>
+            </SectionCard>
+
+            {/* Edit — every field goes into one draft and one commit */}
+            <SectionCard title="Edit subscription" icon="✏️">
+              <SubscriptionEditForm
+                contract={contract ?? {}}
+                lines={editLines}
+                revision={revision}
+                disabled={editDisabled}
+                disabledNote={editNote}
+                submitting={isSubmitting && isEditing}
+                onSubmit={(fd) => submit(fd, { method: "post" })}
+              />
             </SectionCard>
 
             {/* Billing history */}
@@ -643,7 +734,7 @@ export default function SubscriptionDetail() {
                 <Text as="p" variant="bodySm" tone="subdued">Shopify GID</Text>
                 <Text as="p" variant="bodySm">
                   <span style={{ fontFamily: "monospace", fontSize: "11px", wordBreak: "break-all" }}>
-                    {toFullGid(s.shopifyContractId)}
+                    {displayGid(s.shopifyContractId)}
                   </span>
                 </Text>
               </div>

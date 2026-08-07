@@ -5,63 +5,13 @@ import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { advanceBillingDate } from "./api.cron.billing";
-
-// ─── GraphQL query ────────────────────────────────────────────
-const SUBSCRIPTION_CONTRACT_QUERY = `
-  query GetSubscriptionContract($id: ID!) {
-    subscriptionContract(id: $id) {
-      id
-      status
-      nextBillingDate
-      currencyCode
-      customer {
-        id
-        email
-        firstName
-        lastName
-      }
-      billingPolicy {
-        interval
-        intervalCount
-        minCycles
-        maxCycles
-      }
-      deliveryPolicy {
-        interval
-        intervalCount
-      }
-      lines(first: 10) {
-        edges {
-          node {
-            id
-            title
-            variantTitle
-            sku
-            quantity
-            productId
-            variantId
-            sellingPlanId
-            sellingPlanName
-            currentPrice {
-              amount
-              currencyCode
-            }
-            lineDiscountedPrice {
-              amount
-              currencyCode
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-// ─── Convert numeric REST id → GID ───────────────────────────
-function toContractGid(raw: string | number): string {
-  const id = String(raw);
-  return id.startsWith("gid://") ? id : `gid://shopify/SubscriptionContract/${id}`;
-}
+import {
+  SUBSCRIPTION_CONTRACT_QUERY,
+  applyContractToLocal,
+  normaliseFrequency,
+  normaliseStatus,
+  toContractGid,
+} from "../lib/subscription-sync.server";
 
 export async function action({ request }: ActionFunctionArgs) {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
@@ -166,22 +116,9 @@ export async function action({ request }: ActionFunctionArgs) {
           const contract = result?.data?.subscriptionContract ?? null;
 
           if (contract) {
-            const firstNode  = contract.lines?.edges?.[0]?.node ?? null;
-            const rawNext    = contract.nextBillingDate as string | null | undefined;
-            const parsedNext = rawNext ? new Date(rawNext) : null;
-
-            await prisma.subscription.updateMany({
-              where: { shopifyContractId: contractId },
-              data: {
-                status:          normaliseStatus(contract.status),
-                nextBillingDate: (parsedNext && !isNaN(parsedNext.getTime())) ? parsedNext : undefined,
-                customerEmail:   contract.customer?.email   ?? undefined,
-                productTitle:    firstNode?.title           ?? undefined,
-                planName:        firstNode?.sellingPlanName ?? undefined,
-                price:           firstNode?.currentPrice?.amount ? parseFloat(firstNode.currentPrice.amount) : undefined,
-                frequency:       normaliseFrequency(contract.billingPolicy?.interval, contract.billingPolicy?.intervalCount),
-              },
-            });
+            // Shared with the admin edit action so both writers normalise
+            // identically and converge on the same row.
+            await applyContractToLocal(contractId, contract);
 
             console.log(`[Webhook] ✅ Subscription updated (GraphQL): ${contractId}`);
             break;
@@ -379,36 +316,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
-
-function normaliseStatus(raw: string): string {
-  const map: Record<string, string> = {
-    ACTIVE:    "ACTIVE",
-    PAUSED:    "PAUSED",
-    CANCELLED: "CANCELLED",
-    EXPIRED:   "CANCELLED",
-    FAILED:    "CANCELLED",
-  };
-  return map[raw?.toUpperCase()] ?? "PENDING";
-}
-
-// Stores a consistent string that advanceBillingDate() can handle.
-// DAY/1   → "DAILY"
-// WEEK/1  → "WEEKLY"
-// WEEK/2  → "BIWEEKLY"
-// WEEK/3+ → "3 WEEKLY"
-// MONTH/1 → "MONTHLY"
-// MONTH/2 → "2 MONTHLY"
-// YEAR/1  → "YEARLY"
-// YEAR/2  → "2 YEARLY"
-function normaliseFrequency(interval?: string, count?: number): string {
-  if (!interval) return "MONTHLY";
-  const i = interval.toUpperCase();
-  const c = count ?? 1;
-
-  if (i === "DAY")   return c > 1 ? `${c} DAILY`   : "DAILY";
-  if (i === "WEEK")  return c === 1 ? "WEEKLY" : c === 2 ? "BIWEEKLY" : `${c} WEEKLY`;
-  if (i === "MONTH") return c > 1 ? `${c} MONTHLY` : "MONTHLY";
-  if (i === "YEAR")  return c > 1 ? `${c} YEARLY`  : "YEARLY";
-  return "MONTHLY";
-}
+// normaliseStatus / normaliseFrequency / toContractGid /
+// SUBSCRIPTION_CONTRACT_QUERY now live in ../lib/subscription-sync.server so
+// the webhook and the admin edit action share one implementation.
 

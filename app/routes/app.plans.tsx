@@ -936,7 +936,7 @@ export async function action({ request }: ActionFunctionArgs) {
     });
     if (group?.shopifyGroupId) {
       try {
-        await admin.graphql(
+        const res = await admin.graphql(
           `#graphql
           mutation sellingPlanGroupDelete($id: ID!) {
             sellingPlanGroupDelete(id: $id) {
@@ -946,6 +946,17 @@ export async function action({ request }: ActionFunctionArgs) {
           }`,
           { variables: { id: group.shopifyGroupId } },
         );
+        // Must be read: a userErrors rejection still resolves as HTTP 200, and
+        // dropping the local row anyway leaves a live, sellable group on the
+        // storefront that this app can no longer see.
+        const result     = await res.json();
+        const userErrors = result?.data?.sellingPlanGroupDelete?.userErrors ?? [];
+        if (userErrors.length > 0) {
+          return json({
+            ok: false,
+            error: `Delete on Shopify failed: ${userErrors.map((e: { message: string }) => e.message).join(", ")}`,
+          });
+        }
       } catch (err: any) {
         return json({
           ok: false,

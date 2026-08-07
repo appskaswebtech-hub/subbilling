@@ -3,6 +3,7 @@
 import { json } from "@remix-run/node";
 import { useLoaderData, useFetcher, useRevalidator } from "@remix-run/react";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
@@ -32,8 +33,19 @@ type LoaderData = { groups: SellingPlanGroup[]; error?: string };
 type ActionData = { id: string; success: boolean; error?: string };
 
 // ─── Loader ──────────────────────────────────────────────────
+// Selling plan groups this app created for this shop. The Shopify query returns
+// every group on the store, including ones owned by other apps or by the
+// merchant — those must never be listed or deleted from here.
+async function ownedGroupIds(shop: string): Promise<Set<string>> {
+  const rows = await prisma.sellingPlanGroup.findMany({
+    where:  { shop, shopifyGroupId: { not: null } },
+    select: { shopifyGroupId: true },
+  });
+  return new Set(rows.map((r) => r.shopifyGroupId as string));
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const response  = await admin.graphql(`
     query GetAllSellingPlanGroups {
       sellingPlanGroups(first: 50) {
@@ -45,19 +57,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (data.errors) {
     return json<LoaderData>({ groups: [], error: data.errors[0]?.message ?? "Failed to fetch" });
   }
-  const groups: SellingPlanGroup[] = data.data.sellingPlanGroups.edges.map(
-    ({ node }: { node: SellingPlanGroup }) => ({ id: node.id, name: node.name, createdAt: node.createdAt })
-  );
+
+  const owned = await ownedGroupIds(session.shop);
+  const groups: SellingPlanGroup[] = data.data.sellingPlanGroups.edges
+    .map(({ node }: { node: SellingPlanGroup }) => ({ id: node.id, name: node.name, createdAt: node.createdAt }))
+    .filter((g) => owned.has(g.id));
+
   groups.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   return json<LoaderData>({ groups });
 }
 
 // ─── Action ──────────────────────────────────────────────────
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData  = await request.formData();
   const id        = formData.get("id") as string;
   if (!id) return json<ActionData>({ id: "", success: false, error: "No ID provided" });
+
+  // Re-check ownership server-side — the client can post any GID.
+  const owned = await ownedGroupIds(session.shop);
+  if (!owned.has(id)) {
+    return json<ActionData>({ id, success: false, error: "This selling plan group does not belong to this app." });
+  }
+
   try {
     const res  = await admin.graphql(`
       mutation DeleteSellingPlanGroup($id: ID!) {
@@ -71,6 +93,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const userErrors = d.data?.sellingPlanGroupDelete?.userErrors ?? [];
     if (userErrors.length > 0)
       return json<ActionData>({ id, success: false, error: userErrors.map((e: { message: string }) => e.message).join(", ") });
+
+    // Keep the local mirror in step — deleting only in Shopify orphans this row.
+    await prisma.sellingPlanGroup.deleteMany({
+      where: { shop: session.shop, shopifyGroupId: id },
+    });
+
     return json<ActionData>({ id, success: true });
   } catch (err) {
     return json<ActionData>({ id, success: false, error: err instanceof Error ? err.message : "Unknown error" });

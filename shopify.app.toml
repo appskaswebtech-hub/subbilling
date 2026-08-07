@@ -31,12 +31,18 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "customer_read_customers,customer_read_own_subscription_contracts,customer_write_own_subscription_contracts,read_customer_payment_methods,read_customers,read_draft_orders,read_inventory,read_orders,read_own_subscription_contracts,read_products,read_purchase_options,write_customers,write_draft_orders,write_own_subscription_contracts,write_products,write_purchase_options"
+scopes = "customer_read_customers,customer_read_own_subscription_contracts,read_customer_payment_methods,read_customers,read_own_subscription_contracts,read_products,write_customers,write_own_subscription_contracts,write_products,write_purchase_options"
 
 [auth]
 redirect_urls = [ "https://subscription.kaswebtechsolutions.com/api/auth" ]
 
 [app_proxy]
-url = "https://subscription.kaswebtechsolutions.com"
+# Relative on purpose. The proxy REPLACES `/{prefix}/{subpath}` with this URL
+# rather than appending to it, so a bare host would forward
+# /apps/subscriptions/billing-history to /billing-history and 404 — the routes
+# live at /apps/subscriptions/*. A leading-slash value is resolved by the CLI
+# against the current `application_url`, so it follows the dev tunnel and
+# production without a constant that can go stale.
+url = "/apps/subscriptions"
 subpath = "subscriptions"
 prefix = "apps"

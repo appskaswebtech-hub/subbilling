@@ -6,6 +6,11 @@
 
 import "@shopify/ui-extensions/preact";
 import { render, useState, useEffect } from "preact/compat";
+import { appFetch } from "./appApi";
+// The extension is required: the Shopify CLI bundles UI extensions with
+// resolveExtensions [".tsx",".ts",".js",".json",".esnext",".mjs",".ejs"] — no
+// ".jsx" — so an extensionless import of a .jsx file fails at `app deploy`.
+import PaymentMethodSection from "./PaymentMethodSection.jsx";
 
 // ─── GraphQL — fetch one subscription by ID from URL ─────────────
 // Customer Account API passes the page path; we read the contract ID
@@ -232,13 +237,11 @@ function SubscriptionDetailPage() {
 
         setSub(shaped);
 
-        // ── Fetch billing attempts from our app proxy ──────────────
-        var shop = shopify.shop.myshopifyDomain;
-        return fetch(
-          "https://" + shop + "/apps/subscriptions/billing-history?contractId=" + shaped.id,
-          { headers: { "Content-Type": "application/json" } }
-        )
-          .then(function (r) { return r.json(); })
+        // ── Fetch billing attempts from the app backend ────────────
+        // This previously omitted `shop` and so always 400'd, silently
+        // rendering an empty table. The server now reads the shop from the
+        // session token instead.
+        return appFetch("/billing-history?contractId=" + encodeURIComponent(shaped.id))
           .then(function (data) {
             if (data.attempts) {
               setAttempts(data.attempts);
@@ -262,24 +265,17 @@ function SubscriptionDetailPage() {
     setLoadingAct(intent);
     setActionMsg("");
 
-    var shop = shopify.shop.myshopifyDomain;
-
-    fetch("https://" + shop + "/apps/subscriptions/action", {
+    // Previously omitted `shop`, which the handler required — so pause,
+    // resume and cancel could never succeed from this page.
+    appFetch("/action", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contractId: getSub.gid,
-        customerId: getSub.customerId,
         intent: intent,
       }),
     })
-      .then(function (res) { return res.json(); })
       .then(function (data) {
         setLoadingAct(null);
-        if (data.error) {
-          setActionMsg("Error: " + data.error);
-          return;
-        }
         var labels = {
           pause: "Subscription paused successfully.",
           resume: "Subscription resumed.",
@@ -477,6 +473,9 @@ function SubscriptionDetailPage() {
           }
         </s-box>
       </s-section>
+
+      {/* ── 3b. Payment method ──────────────────────────────── */}
+      {!isCancelled ? <PaymentMethodSection contractId={sub.gid} /> : null}
 
       {/* ── 4. Actions ───────────────────────────────────────── */}
       {!isCancelled

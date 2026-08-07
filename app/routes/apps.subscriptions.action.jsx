@@ -1,151 +1,97 @@
 // app/routes/apps.subscriptions.action.jsx
+//
+// Pause / resume / cancel a subscription from the Customer Account UI extension.
+//
+// This route used to take `shop` from the request body and use it to load that
+// shop's offline access token, with no authentication of any kind — any caller
+// could drive any shop's Admin API against any contract id. Both the shop and
+// the customer now come from the verified customer-account session token, and
+// the contract must belong to that customer.
 
 import { json } from "@remix-run/node";
 import prisma from "../db.server";
+import {
+  assertOwnsContract,
+  authenticateCustomer,
+  corsHeaders,
+  toContractGid,
+} from "../lib/customer-auth.server";
+import {
+  activateContract,
+  cancelContract,
+  pauseContract,
+} from "../lib/subscription-contract.server";
 
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin":  "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Content-Type":                 "application/json",
-  };
-}
+const OPERATIONS = {
+  pause:  pauseContract,
+  resume: activateContract,
+  cancel: cancelContract,
+};
 
-// ── OPTIONS preflight + GET both handled in loader ────────────
+// Remix routes GET/HEAD/OPTIONS to the loader. This route only mutates, so the
+// only reason it has one is to answer a CORS preflight — the extension no
+// longer sends one, but a direct (non-proxied) caller reasonably could.
+// Anything else is refused rather than answered with a bare 200, which would
+// otherwise look like an unauthenticated endpoint.
 export async function loader({ request }) {
-  // OPTIONS preflight MUST be handled here in Remix (not in action)
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
+    return new Response(null, { status: 204, headers: corsHeaders("POST, OPTIONS") });
   }
-  return json({ ok: true }, { headers: corsHeaders() });
+  return json({ error: "Method not allowed" }, { status: 405, headers: corsHeaders("POST, OPTIONS") });
 }
 
-// ── POST ──────────────────────────────────────────────────────
 export async function action({ request }) {
-  // Also handle OPTIONS here just in case
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
+    return new Response(null, { status: 204, headers: corsHeaders("POST, OPTIONS") });
   }
 
-  // ── Parse body ──────────────────────────────────────────────
+  const ctx = await authenticateCustomer(request);
+
   let body;
   try {
     body = await request.json();
   } catch {
-    return json({ error: "Invalid JSON body" }, { status: 400, headers: corsHeaders() });
+    return json({ error: "Invalid JSON body" }, { status: 400, headers: corsHeaders("POST, OPTIONS") });
   }
 
-  const { contractId, intent, shop } = body;
+  const { contractId, intent } = body ?? {};
 
-  if (!contractId || !intent || !shop) {
+  if (!contractId || !intent) {
     return json(
-      { error: "Missing fields: contractId, intent, shop" },
-      { status: 400, headers: corsHeaders() }
+      { error: "Missing fields: contractId, intent" },
+      { status: 400, headers: corsHeaders("POST, OPTIONS") },
     );
   }
-
-  if (!["pause", "resume", "cancel"].includes(intent)) {
-    return json({ error: "Invalid intent" }, { status: 400, headers: corsHeaders() });
+  if (!OPERATIONS[intent]) {
+    return json({ error: "Invalid intent" }, { status: 400, headers: corsHeaders("POST, OPTIONS") });
   }
 
-  // ── Look up offline session ──────────────────────────────────
-  let session;
-  try {
-    session = await prisma.session.findFirst({
-      where: { shop, isOnline: false },
-    });
-  } catch (err) {
-    console.error("[action] DB error:", err);
-    return json({ error: "DB error" }, { status: 500, headers: corsHeaders() });
+  const gid = toContractGid(contractId);
+  await assertOwnsContract(ctx, gid);
+
+  // Shared helper: checks top-level errors and userErrors, and returns the
+  // status Shopify actually applied.
+  const result = await OPERATIONS[intent](ctx.shop, gid);
+
+  if (!result.ok) {
+    return json({ error: result.error }, { status: 422, headers: corsHeaders("POST, OPTIONS") });
   }
 
-  if (!session?.accessToken) {
-    console.error("[action] No offline session for shop:", shop);
-    return json(
-      { error: "App not installed or session expired for: " + shop },
-      { status: 401, headers: corsHeaders() }
-    );
-  }
-
-  // ── Build GID ────────────────────────────────────────────────
-  const gid = contractId.startsWith("gid://")
-    ? contractId
-    : `gid://shopify/SubscriptionContract/${contractId}`;
-
-  // ── Shopify Admin GraphQL mutations ──────────────────────────
-  const MUTATIONS = {
-    pause:  `mutation { subscriptionContractPause(subscriptionContractId: "${gid}") { contract { id status } userErrors { field message } } }`,
-    resume: `mutation { subscriptionContractActivate(subscriptionContractId: "${gid}") { contract { id status } userErrors { field message } } }`,
-    cancel: `mutation { subscriptionContractCancel(subscriptionContractId: "${gid}") { contract { id status } userErrors { field message } } }`,
-  };
-
-  const KEYS = {
-    pause:  "subscriptionContractPause",
-    resume: "subscriptionContractActivate",
-    cancel: "subscriptionContractCancel",
-  };
-  console.log("[action] Received intent:", intent, "for contractId:", contractId, "shop:", shop);
-  console.log("[action] Using GID:", session.accessToken);
-  // ── Call Shopify Admin API ────────────────────────────────────
-  let newStatus;
-  try {
-    const apiRes = await fetch(
-      `https://${shop}/admin/api/2026-04/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":           "application/json",
-          "X-Shopify-Access-Token": session.accessToken,
-        },
-        body: JSON.stringify({ query: MUTATIONS[intent] }),
-      }
-    );
-
-    const data   = await apiRes.json();
-    console.log("[action] Shopify response:", JSON.stringify(data));
-    const result = data?.data?.[KEYS[intent]];
-
-    console.log("[action] Shopify response:", JSON.stringify(data));
-
-    if (!result) {
-      return json(
-        { error: "No result from Shopify" },
-        { status: 500, headers: corsHeaders() }
-      );
-    }
-
-    if (result.userErrors?.length > 0) {
-      return json(
-        { error: result.userErrors[0].message },
-        { status: 422, headers: corsHeaders() }
-      );
-    }
-
-    newStatus = result.contract?.status;
-  } catch (err) {
-    console.error("[action] Shopify API error:", err);
-    return json(
-      { error: "Shopify API failed: " + err.message },
-      { status: 500, headers: corsHeaders() }
-    );
-  }
-
-  // ── Sync to DB (non-fatal) ────────────────────────────────────
+  // Mirror locally — non-fatal, the webhook reconciles anyway.
   try {
     await prisma.subscription.updateMany({
       where: {
-        shop,
+        shop: ctx.shop,
         OR: [{ shopifyContractId: gid }, { shopifyContractId: contractId }],
       },
-      data: { status: newStatus, updatedAt: new Date() },
+      data: { status: result.status, updatedAt: new Date() },
     });
   } catch (err) {
     console.error("[action] DB sync error:", err);
   }
 
   return json(
-    { success: true, status: newStatus },
-    { status: 200, headers: corsHeaders() }
+    { success: true, status: result.status },
+    { status: 200, headers: corsHeaders("POST, OPTIONS") },
   );
 }

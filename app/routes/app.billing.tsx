@@ -49,6 +49,10 @@ interface AppSubscriptionCreateResponse {
 
 const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(Boolean);
 
+// All plans share one trial length, so the page-level copy reads it from config
+// rather than hardcoding a number that can drift away from PLANS.
+const TRIAL_DAYS = PLANS.basic.trialDays;
+
 // ─── Shopify charge mode ──────────────────────────────────────
 // Controls the `test` argument on appSubscriptionCreate. Nothing else.
 //
@@ -63,7 +67,7 @@ const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(B
 // NOTE: this file (app/routes/app.billing.tsx) is the ONLY billing page Remix
 // loads. app/app.billing.tsxeses is a dead copy; editing it has no effect on
 // the running app.
-const BILLING_TEST_MODE = false;
+const BILLING_TEST_MODE = true;
 
 // ─── Loader ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -203,7 +207,7 @@ export default function BillingPage() {
               <Text as="h1" variant="headingXl" fontWeight="bold">Choose your plan</Text>
               <Text as="p" variant="bodySm" tone="subdued">
                 Pick the plan that best fits your store's needs. All plans include a{" "}
-                <span style={{ color: T.purpleFg, fontWeight: 500 }}>7-day free trial</span>.
+                <span style={{ color: T.purpleFg, fontWeight: 500 }}>{TRIAL_DAYS}-day free trial</span>.
               </Text>
             </div>
           </BlockStack>
@@ -393,7 +397,7 @@ export default function BillingPage() {
             <span style={{ fontSize: "14px" }}>⊞</span>
             <Text as="span" variant="bodySm" fontWeight="semibold">All plans include</Text>
           </div>
-          {["7-day free trial", "Cancel anytime", "No setup fees", "Secure & reliable"].map((item) => (
+          {[`${TRIAL_DAYS}-day free trial`, "Cancel anytime", "No setup fees", "Secure & reliable"].map((item) => (
             <div key={item} style={{ display: "flex", alignItems: "center", gap: "5px" }}>
               <span style={{ color: T.greenDot, fontWeight: 700, fontSize: "12px" }}>✓</span>
               <Text as="span" variant="bodySm" tone="subdued">{item}</Text>
@@ -403,7 +407,7 @@ export default function BillingPage() {
 
         {/* Footer note */}
         <Text as="p" alignment="center" variant="bodySm" tone="subdued">
-          ⊞ All plans include a 7-day free trial. Cancel anytime from your Shopify admin. Billed in USD.
+          ⊞ All plans include a {TRIAL_DAYS}-day free trial. Cancel anytime from your Shopify admin. Billed in USD.
         </Text>
 
       </BlockStack>

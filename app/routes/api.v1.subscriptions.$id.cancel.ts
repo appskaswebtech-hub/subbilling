@@ -6,7 +6,7 @@
 import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticateApiKey } from "../lib/api-auth.server";
-import { unauthenticated } from "../shopify.server";
+import { cancelContract } from "../lib/subscription-contract.server";
 import prisma from "../db.server";
 
 export async function action({ request, params }: ActionFunctionArgs) {
@@ -29,24 +29,16 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return json({ error: "Subscription is already cancelled" }, { status: 400 });
   }
 
-  // Cancel on Shopify via GraphQL
-  try {
-    const { admin } = await unauthenticated.admin(shop);
-    await admin.graphql(`
-      mutation SubscriptionContractCancel($subscriptionContractId: ID!) {
-        subscriptionContractCancel(subscriptionContractId: $subscriptionContractId) {
-          subscriptionContract { status }
-          userErrors { field message }
-        }
-      }
-    `, { variables: { subscriptionContractId: subscription.shopifyContractId } });
-  } catch (err) {
-    console.error("[API] Failed to cancel on Shopify:", err);
+  // Shopify is the source of truth — only mirror locally once it confirms.
+  const result = await cancelContract(shop, subscription.shopifyContractId);
+
+  if (!result.ok) {
+    return json({ error: `Shopify rejected the cancellation: ${result.error}` }, { status: 502 });
   }
 
   const updated = await prisma.subscription.update({
     where: { id },
-    data:  { status: "CANCELLED" },
+    data:  { status: result.status },
   });
 
   return json({ subscription: updated, message: "Subscription cancelled successfully" });

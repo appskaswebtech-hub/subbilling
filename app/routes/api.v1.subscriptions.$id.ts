@@ -13,6 +13,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticateApiKey } from "../lib/api-auth.server";
+import { setContractNextBillingDate } from "../lib/subscription-contract.server";
 import prisma from "../db.server";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -63,9 +64,25 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // Normalize to midnight UTC
   nextBillingDate.setUTCHours(0, 0, 0, 0);
 
+  // Reschedule on the contract first — a local-only change would silently
+  // desynchronize the app from the billing Shopify actually performs.
+  const result = await setContractNextBillingDate(
+    shop,
+    subscription.shopifyContractId,
+    nextBillingDate,
+  );
+
+  if (!result.ok) {
+    return json({ error: `Shopify rejected the new billing date: ${result.error}` }, { status: 502 });
+  }
+
   const updated = await prisma.subscription.update({
     where: { id },
-    data:  { nextBillingDate },
+    data:  {
+      nextBillingDate: result.nextBillingDate
+        ? new Date(result.nextBillingDate)
+        : nextBillingDate,
+    },
   });
 
   return json({ subscription: updated });

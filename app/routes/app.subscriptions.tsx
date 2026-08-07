@@ -98,8 +98,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const page         = Math.max(1, parseInt(url.searchParams.get("page") ?? "1", 10));
   const skip         = (page - 1) * PAGE_SIZE;
 
+  // Set when the Shopify admin deep-links here from an order or customer.
+  // customerId is normally a full GID, but webhooks.tsx can fall back to a bare
+  // numeric, so match both shapes.
+  const rawCustomer  = url.searchParams.get("customer_id");
+  const customerNum  = rawCustomer?.split("/").pop() || "";
+  const customerWhere = customerNum
+    ? { customerId: { in: [`gid://shopify/Customer/${customerNum}`, customerNum] } }
+    : {};
+
   const where = {
     shop: session.shop,
+    ...customerWhere,
     ...(statusFilter ? { status: statusFilter } : {}),
     ...(search
       ? { OR: [
@@ -110,7 +120,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       : {}),
   };
 
-  const baseWhere = { shop: session.shop };
+  // Scoped to the customer too, so the stat cards agree with the visible rows.
+  const baseWhere = { shop: session.shop, ...customerWhere };
 
   const [subscriptions, total, totalAll, totalActive, totalPaused, totalCancelled] =
     await Promise.all([
@@ -127,6 +138,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     total,
     page,
     totalPages: Math.ceil(total / PAGE_SIZE),
+    customerFilter: customerNum || null,
     counts: {
       all:       totalAll,
       active:    totalActive,
@@ -475,7 +487,7 @@ function RowMenu({
 
 // ─── Component ────────────────────────────────────────────────
 export default function Subscriptions() {
-  const { subscriptions, total, page, totalPages, counts } = useLoaderData<typeof loader>();
+  const { subscriptions, total, page, totalPages, counts, customerFilter } = useLoaderData<typeof loader>();
   const navigate    = useNavigate();
   const submit      = useSubmit();
   const [params]    = useSearchParams();
@@ -611,6 +623,29 @@ export default function Subscriptions() {
           </Button>
         </InlineStack>
 </div>
+        {/* Deep-linked from the Shopify admin for one customer */}
+        {customerFilter && (
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: "8px",
+            background: T.purpleBg, color: T.purpleFg,
+            border: `0.5px solid ${T.purple}`, borderRadius: "20px",
+            padding: "5px 8px 5px 14px", fontSize: "12px", fontWeight: 500,
+            alignSelf: "flex-start",
+          }}>
+            Showing subscriptions for customer #{customerFilter}
+            <button
+              onClick={() => goTo({ customer_id: "", page: "1" })}
+              aria-label="Clear customer filter"
+              style={{
+                border: "none", background: "transparent", cursor: "pointer",
+                color: T.purpleFg, fontSize: "15px", lineHeight: 1, padding: "0 4px",
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {/* Error banner */}
         {actionError && (
           <Banner tone="critical" title="Action failed" onDismiss={() => setActionError(null)}>

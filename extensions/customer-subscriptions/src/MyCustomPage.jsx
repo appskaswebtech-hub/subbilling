@@ -2,9 +2,12 @@
 
 import '@shopify/ui-extensions/preact';
 import { render, useState, useEffect } from "preact/compat";
+import { appFetch } from "./appApi";
+// Extension required — see the note in SubscriptionDetailPage.jsx: the CLI's
+// bundler does not list ".jsx" in resolveExtensions.
+import PaymentMethodSection from "./PaymentMethodSection.jsx";
 
 const ENDPOINT = "shopify://customer-account/api/2026-04/graphql.json";
-const APP_URL  = "https://negotiation-horizontal-commonly-enters.trycloudflare.com";
 
 const QUERY = `{
   customer {
@@ -73,22 +76,8 @@ function attemptTone(s) {
   return "info";
 }
 
-async function getAppInfo() {
-  try {
-    var token   = await shopify.sessionToken.get();
-    var payload = JSON.parse(atob(token.split(".")[1]));
-    return {
-      appUrl: APP_URL,
-      shop:   payload.dest, // full URL like https://xxx.myshopify.com
-    };
-  } catch(e) {
-    console.error("getAppInfo error:", e);
-    return { appUrl: APP_URL, shop: null };
-  }
-}
-
 // ─── BillingAttempts inline panel ─────────────────────────────
-function BillingAttemptsPanel({ contractId, shop }) {
+function BillingAttemptsPanel({ contractId }) {
   var loadingArr  = useState(true);
   var attemptsArr = useState([]);
   var errorArr    = useState("");
@@ -98,24 +87,19 @@ function BillingAttemptsPanel({ contractId, shop }) {
   var getError    = errorArr[0];    var setError     = errorArr[1];
 
   useEffect(function() {
-    if (!shop || !contractId) return;
+    if (!contractId) return;
 
-    // Extract hostname from full URL if needed
-    var shopHost = shop;
-    try { shopHost = new URL(shop).hostname; } catch(e) {}
-
-    fetch(APP_URL + "/apps/subscriptions/billing-history?contractId=" + contractId + "&shop=" + shopHost)
-      .then(function(r) { return r.json(); })
+    // No shop param: the server reads it from the session token.
+    appFetch("/billing-history?contractId=" + encodeURIComponent(contractId))
       .then(function(data) {
         setLoading(false);
-        if (data.error) { setError(data.error); return; }
         setAttempts(data.attempts || []);
       })
       .catch(function(err) {
         setLoading(false);
         setError(err.message || "Failed to load");
       });
-  }, [contractId, shop]);
+  }, [contractId]);
 
   if (isLoading) {
     return (
@@ -186,45 +170,29 @@ function BillingAttemptsPanel({ contractId, shop }) {
 }
 
 // ─── SubscriptionCard ─────────────────────────────────────────
-function SubscriptionCard({ sub, customerId, onStatusChange }) {
+function SubscriptionCard({ sub, onStatusChange }) {
   var loadingArr  = useState(null);
   var msgArr      = useState("");
   var showHistArr = useState(false);
-  var shopArr     = useState(null);
+  var showPayArr  = useState(false);
 
   var getLoading  = loadingArr[0];  var setLoading  = loadingArr[1];
   var getMsg      = msgArr[0];      var setMsg      = msgArr[1];
   var showHistory = showHistArr[0]; var setShowHistory = showHistArr[1];
-  var getShop     = shopArr[0];     var setShop     = shopArr[1];
-
-  // Load shop info once on mount
-  useEffect(function() {
-    getAppInfo().then(function(info) {
-      if (info) setShop(info.shop);
-    });
-  }, []);
+  var showPayment = showPayArr[0];  var setShowPayment = showPayArr[1];
 
   async function doAction(intent) {
     setLoading(intent);
     setMsg("");
 
-    var info = await getAppInfo();
-    if (!info) { setMsg("Error: Could not get app info."); setLoading(null); return; }
-
     try {
-      var res  = await fetch(info.appUrl + "/apps/subscriptions/action", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contractId: sub.gid,
-          customerId: customerId,
-          intent:     intent,
-          shop:       info.shop,
-        }),
+      // No shop or customerId in the body — the server takes both from the
+      // verified session token.
+      var data = await appFetch("/action", {
+        method: "POST",
+        body:   JSON.stringify({ contractId: sub.gid, intent: intent }),
       });
-      var data = await res.json();
       setLoading(null);
-      if (data.error) { setMsg("Error: " + data.error); return; }
       var labels = { pause: "Paused successfully.", resume: "Resumed.", cancel: "Cancelled." };
       setMsg(labels[intent] || "Done.");
       onStatusChange(sub.id, normalizeStatus(data.status));
@@ -350,6 +318,20 @@ function SubscriptionCard({ sub, customerId, onStatusChange }) {
             ) : null
           }
 
+          {/* Toggle payment method — loads lazily, since each open costs two
+              Admin API calls and this page can list many subscriptions.
+              Hidden once cancelled: there is nothing left to bill. */}
+          {status !== "CANCELLED" && status !== "EXPIRED"
+            ? (
+              <s-button
+                variant="plain"
+                onClick={function() { setShowPayment(!showPayment); }}
+              >
+                {showPayment ? "Hide payment method ↑" : "Change payment method ↓"}
+              </s-button>
+            ) : null
+          }
+
           {/* Toggle billing history */}
           <s-button
             variant="plain"
@@ -361,6 +343,19 @@ function SubscriptionCard({ sub, customerId, onStatusChange }) {
         </s-stack>
       </s-box>
 
+      {/* Payment method panel — shown inline when toggled */}
+      {showPayment
+        ? (
+          <s-box>
+            <s-divider />
+            <s-box padding-inline="base" padding-block-start="none">
+              <s-text type="strong">Payment Method</s-text>
+            </s-box>
+            <PaymentMethodSection contractId={sub.gid} wrap={false} />
+          </s-box>
+        ) : null
+      }
+
       {/* Billing attempts panel — shown inline when toggled */}
       {showHistory
         ? (
@@ -369,7 +364,7 @@ function SubscriptionCard({ sub, customerId, onStatusChange }) {
             <s-box padding-inline="base" padding-block-start="none">
               <s-text type="strong">Payment History</s-text>
             </s-box>
-            <BillingAttemptsPanel contractId={sub.id} shop={getShop} />
+            <BillingAttemptsPanel contractId={sub.id} />
           </s-box>
         ) : null
       }
@@ -475,7 +470,6 @@ function Extension() {
             <SubscriptionCard
               key={sub.id}
               sub={sub}
-              customerId={getCustomer}
               onStatusChange={handleStatusChange}
             />
           );
