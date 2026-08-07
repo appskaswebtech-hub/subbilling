@@ -16,6 +16,15 @@ import "@shopify/ui-extensions/preact";
 import { useState, useEffect } from "preact/compat";
 import { appFetch } from "./appApi";
 
+// The Intents API needs a full GID. Both call sites already pass one, but the
+// component should not depend on that.
+function toContractGid(raw) {
+  var id = String(raw || "");
+  return id.indexOf("gid://") === 0
+    ? id
+    : "gid://shopify/SubscriptionContract/" + id;
+}
+
 export default function PaymentMethodSection({ contractId, wrap = true }) {
   var stateArr   = useState("loading");   // loading | done | error
   var currentArr = useState(null);
@@ -75,21 +84,50 @@ export default function PaymentMethodSection({ contractId, wrap = true }) {
       });
   }
 
-  function openUpdatePage() {
+  // Opens Shopify's own payment-method replacement flow.
+  //
+  // This used to call the app, which called customerPaymentMethodGetUpdateUrl —
+  // but Shopify supports that mutation for Shop Pay ONLY and returns
+  // INVALID_INSTRUMENT for everything else, so the button could never work for
+  // an ordinary card. The Intents API exists for precisely this, and replacing a
+  // subscription contract's payment method is currently the only thing it does.
+  async function openUpdatePage() {
+    if (!shopify.intents || typeof shopify.intents.invoke !== "function") {
+      setMsg(
+        "Error: this store's customer accounts do not support the Intents API, " +
+        "which is required to change card details here."
+      );
+      return;
+    }
+
     setBusy("update-url");
     setMsg("");
-    appFetch("/payment-method", {
-      method: "POST",
-      body: JSON.stringify({ intent: "update-url", contractId: contractId }),
-    })
-      .then(function (data) {
-        setBusy(null);
-        if (data.updateUrl) open(data.updateUrl, "_blank");
-      })
-      .catch(function (err) {
-        setBusy(null);
-        setMsg("Error: " + (err && err.message ? err.message : "could not open the update page"));
+
+    try {
+      const activity = await shopify.intents.invoke({
+        action: "open",
+        type:   "shopify/SubscriptionContract",
+        value:  toContractGid(contractId),
+        data:   { field: "paymentMethod" },
       });
+
+      // Resolves when the customer finishes, cancels, or the flow fails.
+      const res = await activity.complete;
+      setBusy(null);
+
+      if (res && res.code === "ok") {
+        setMsg("Payment method updated.");
+        // Re-read from the server rather than assuming what changed.
+        await load();
+      } else if (res && res.code === "closed") {
+        // Dismissed without completing — not an error, so say nothing.
+      } else {
+        setMsg("Error: " + ((res && res.message) || "could not update the payment method"));
+      }
+    } catch (err) {
+      setBusy(null);
+      setMsg("Error: " + (err && err.message ? err.message : "could not open the update flow"));
+    }
   }
 
   if (getState === "loading") {

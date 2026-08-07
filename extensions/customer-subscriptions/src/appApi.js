@@ -26,7 +26,7 @@
 // extension starts depending on new server behaviour. A mismatch means the app
 // server is running an older build than this extension — the exact deploy skew
 // that produced an unexplained "Failed to fetch".
-export const APP_BUILD_ID = "2026-08-06.proxy-path";
+export const APP_BUILD_ID = "2026-08-07.payment-intent";
 
 // Route prefix on the app itself. The routes are named apps.subscriptions.*
 // because they were originally reached through the proxy; the names are kept so

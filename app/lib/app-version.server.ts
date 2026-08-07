@@ -11,4 +11,4 @@
 // extensions/customer-subscriptions/src/appApi.js whenever the extension starts
 // depending on new server behaviour. The extension compares the two and warns
 // when they differ.
-export const APP_BUILD_ID = "2026-08-06.proxy-path";
+export const APP_BUILD_ID = "2026-08-07.payment-intent";

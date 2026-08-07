@@ -8,13 +8,16 @@
 //   POST { intent: "switch",
 //          contractId, paymentMethodId }
 //                                 → point the contract at another saved card
-//   POST { intent: "update-url",
-//          contractId }           → a Shopify-hosted URL where the customer can
-//                                   enter new card details
 //
 // Every request is authenticated from the customer-account session token and
 // checked for ownership of the contract. No card data ever passes through this
-// app — "update-url" hands the customer to Shopify's own page.
+// app.
+//
+// Changing a card's DETAILS is deliberately not here. It used to be, via
+// customerPaymentMethodGetUpdateUrl, but Shopify supports that mutation for Shop
+// Pay only and returns INVALID_INSTRUMENT for anything else. The extension now
+// calls Shopify's native flow directly (shopify.intents.invoke with
+// `field: "paymentMethod"`), which needs no backend at all.
 
 import { json } from "@remix-run/node";
 import {
@@ -50,15 +53,6 @@ const CUSTOMER_PAYMENT_METHODS = `
       paymentMethods(first: 10) {
         edges { node { ${CARD_FIELDS} } }
       }
-    }
-  }
-`;
-
-const GET_UPDATE_URL = `
-  mutation GetUpdateUrl($customerPaymentMethodId: ID!) {
-    customerPaymentMethodGetUpdateUrl(customerPaymentMethodId: $customerPaymentMethodId) {
-      updatePaymentMethodUrl
-      userErrors { field message }
     }
   }
 `;
@@ -119,11 +113,23 @@ export async function loader({ request }) {
 
   // A revoked method can no longer be charged, so it is never offered as an
   // alternative. The one currently in use is excluded from "switch to".
+  //
+  // The same card is often vaulted more than once — every test order does it on
+  // the bogus gateway, and real customers hit a milder version when a card is
+  // re-vaulted. Since switching to either copy has an identical effect,
+  // duplicates are collapsed so the list stays readable.
+  const seen = new Set();
   const available = (customerData?.customer?.paymentMethods?.edges ?? [])
     .map((e) => e.node)
     .filter((n) => n && !n.revokedAt)
     .map(shapeCard)
-    .filter((c) => c.id !== current?.id);
+    .filter((c) => c.id !== current?.id)
+    .filter((c) => {
+      const key = [c.brand, c.lastDigits, c.expiryMonth, c.expiryYear].join("|");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
   return json(
     { current, available, currentRevoked: Boolean(contractData?.subscriptionContract?.customerPaymentMethod?.revokedAt) },
@@ -184,29 +190,6 @@ export async function action({ request }) {
 
     const updated = shapeCard(result.contract?.customerPaymentMethod);
     return json({ success: true, current: updated }, { headers: corsHeaders() });
-  }
-
-  // ── Hand the customer to Shopify's hosted update page ──────
-  if (intent === "update-url") {
-    const contractData = await gql(ctx.admin, CONTRACT_PAYMENT_METHOD, { id: contractGid });
-    const methodId     = contractData?.subscriptionContract?.customerPaymentMethod?.id;
-
-    if (!methodId) {
-      return json({ error: "This subscription has no payment method to update." }, { status: 404, headers: corsHeaders() });
-    }
-
-    const data       = await gql(ctx.admin, GET_UPDATE_URL, { customerPaymentMethodId: methodId });
-    const payload    = data?.customerPaymentMethodGetUpdateUrl;
-    const userErrors = payload?.userErrors ?? [];
-
-    if (userErrors.length > 0) {
-      return json({ error: userErrors.map((e) => e.message).join(" | ") }, { status: 422, headers: corsHeaders() });
-    }
-    if (!payload?.updatePaymentMethodUrl) {
-      return json({ error: "Shopify did not return an update URL." }, { status: 502, headers: corsHeaders() });
-    }
-
-    return json({ success: true, updateUrl: payload.updatePaymentMethodUrl }, { headers: corsHeaders() });
   }
 
   return json({ error: `Unknown intent: ${intent}` }, { status: 400, headers: corsHeaders() });
