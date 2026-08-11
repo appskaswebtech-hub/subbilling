@@ -88,6 +88,49 @@ const T = {
   redBorder:  "#F09595",
 };
 
+// ─── Orders on this contract ──────────────────────────────────
+// Deliberately a separate document from SUBSCRIPTION_CONTRACT_QUERY: that one
+// is shared with webhooks.tsx and plan propagation, and adding `orders` there
+// would make every webhook sync require read_orders — failing hard wherever the
+// grant is missing. Keeping it here confines the new scope to this one page.
+//
+// `orders` needs read_orders. read_all_orders is not a field-level requirement;
+// it widens the window, so without it this returns only the last 60 days.
+const CONTRACT_ORDERS_QUERY = `#graphql
+  query ContractOrders($id: ID!) {
+    subscriptionContract(id: $id) {
+      orders(first: 50, reverse: true) {
+        edges {
+          node {
+            id
+            name
+            processedAt
+            displayFinancialStatus
+            displayFulfillmentStatus
+            totalPriceSet { shopMoney { amount currencyCode } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+interface ContractOrder {
+  id:                       string;
+  name:                     string;
+  processedAt:              string | null;
+  displayFinancialStatus:   string | null;
+  displayFulfillmentStatus: string | null;
+  totalPriceSet?:           { shopMoney?: { amount: string; currencyCode: string } | null } | null;
+}
+
+// True when Shopify refused for lack of a scope, rather than failing for some
+// other reason. Those two need different messages: one is "waiting on Shopify
+// to approve your request", the other is a real fault.
+function isScopeError(message: string): boolean {
+  return /access denied|not approved|required access|read_all_orders|read_orders/i.test(message);
+}
+
 // ─── Loader ───────────────────────────────────────────────────
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -119,6 +162,36 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     contractError = err instanceof Error ? err.message : "Could not reach Shopify.";
   }
 
+  // The orders Shopify actually created for this contract — distinct from the
+  // local BillingAttempt rows below, which are charge attempts this app
+  // recorded since it was installed.
+  //
+  // Isolated in its own try/catch on purpose: read_all_orders needs Partner
+  // Dashboard approval (up to 7 business days) and merchants must re-authorize
+  // after a scope change, so "not granted yet" is the normal state for a while.
+  // It must degrade to a note, never take the page down.
+  let orders: ContractOrder[]   = [];
+  let ordersError: string | null = null;
+  let ordersScopeMissing         = false;
+  try {
+    const res    = await admin.graphql(CONTRACT_ORDERS_QUERY, {
+      variables: { id: toFullGid(subscription.shopifyContractId) },
+    });
+    const result = await res.json() as any;
+    if (result?.errors?.length) {
+      const msg = result.errors.map((e: any) => e.message).join(" | ");
+      ordersScopeMissing = isScopeError(msg);
+      ordersError        = msg;
+    } else {
+      orders = (result?.data?.subscriptionContract?.orders?.edges ?? [])
+        .map((e: any) => e.node)
+        .filter(Boolean);
+    }
+  } catch (err) {
+    ordersError = err instanceof Error ? err.message : "Could not reach Shopify.";
+    ordersScopeMissing = isScopeError(ordersError);
+  }
+
   // Editing mid-charge can bill the same cycle twice — the cron advances
   // nextBillingDate before it creates the attempt.
   const pendingAttempts = await prisma.billingAttempt.count({
@@ -129,6 +202,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     subscription,
     contract,
     contractError,
+    orders,
+    ordersError,
+    ordersScopeMissing,
     revision:          contractRevision(contract),
     hasPendingAttempt: pendingAttempts > 0,
   });
@@ -337,8 +413,10 @@ function SectionCard({ title, icon, children }: { title: string; icon?: string; 
 
 // ─── Component ────────────────────────────────────────────────
 export default function SubscriptionDetail() {
-  const { subscription, contract, contractError, revision, hasPendingAttempt } =
-    useLoaderData<typeof loader>();
+  const {
+    subscription, contract, contractError, revision, hasPendingAttempt,
+    orders, ordersError, ordersScopeMissing,
+  } = useLoaderData<typeof loader>();
   const actionData        = useActionData<typeof action>();
   const submit            = useSubmit();
   const navigation        = useNavigation();
@@ -614,6 +692,96 @@ export default function SubscriptionDetail() {
             </SectionCard>
 
             {/* Billing history */}
+            {/* Orders Shopify created for this contract. Shown above billing
+                history because orders are the outcome and attempts are the
+                mechanism. Needs read_orders; read_all_orders is what makes
+                anything older than 60 days appear. */}
+            <SectionCard title={`Orders (${orders.length})`} icon="📦">
+              {ordersError ? (
+                <div style={{ padding: "16px 0" }}>
+                  <Text as="p" tone="subdued">
+                    {ordersScopeMissing
+                      ? "Order history needs the “Read all orders” permission. It's requested in the Partner Dashboard and can take a few days to be approved — this section will fill in once it is granted and the app is re-authorised."
+                      : `Could not load orders: ${ordersError}`}
+                  </Text>
+                </div>
+              ) : orders.length === 0 ? (
+                <div style={{ padding: "16px 0" }}>
+                  <Text as="p" tone="subdued">No orders yet for this subscription.</Text>
+                </div>
+              ) : (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr>
+                        {["Order", "Date", "Total", "Payment", "Fulfilment"].map((h, i) => (
+                          <th
+                            key={i}
+                            style={{
+                              padding:       "10px 0 10px 0",
+                              paddingRight:  "16px",
+                              textAlign:     "left",
+                              fontSize:      "11px",
+                              fontWeight:    500,
+                              color:         "var(--p-color-text-subdued)",
+                              letterSpacing: "0.06em",
+                              textTransform: "uppercase",
+                              borderBottom:  "0.5px solid var(--p-color-border)",
+                              whiteSpace:    "nowrap",
+                            }}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders.map((o, i) => {
+                        const isLast = i === orders.length - 1;
+                        const cell: React.CSSProperties = {
+                          padding:      "12px 16px 12px 0",
+                          fontSize:     "12px",
+                          color:        "var(--p-color-text)",
+                          borderBottom: isLast ? "none" : "0.5px solid var(--p-color-border-secondary)",
+                          verticalAlign:"middle",
+                        };
+                        const money    = o.totalPriceSet?.shopMoney;
+                        const orderNum = o.id.split("/").pop();
+                        return (
+                          <tr key={o.id} style={{ borderLeft: `3px solid ${T.purple}` }}>
+                            <td style={{ ...cell, paddingLeft: "12px", fontWeight: 500 }}>
+                              <a
+                                href={`shopify://admin/orders/${orderNum}`}
+                                style={{ color: T.purple, textDecoration: "none" }}
+                              >
+                                {o.name}
+                              </a>
+                            </td>
+                            <td style={{ ...cell, color: "var(--p-color-text-subdued)" }}>
+                              <IconCell icon={<CellIcon icon={IconCalendar} color={T.purple} />}>
+                                {o.processedAt ? fmtDateTime(o.processedAt) : "—"}
+                              </IconCell>
+                            </td>
+                            <td style={{ ...cell, fontWeight: 500 }}>
+                              {money ? `${money.currencyCode} ${parseFloat(money.amount).toFixed(2)}` : "—"}
+                            </td>
+                            <td style={cell}>
+                              {o.displayFinancialStatus
+                                ? statusPill(o.displayFinancialStatus.toUpperCase())
+                                : "—"}
+                            </td>
+                            <td style={{ ...cell, color: "var(--p-color-text-subdued)" }}>
+                              {o.displayFulfillmentStatus ?? "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </SectionCard>
+
             <SectionCard title={`Billing history (${s.billingAttempts.length})`} icon="🧾">
               {s.billingAttempts.length === 0 ? (
                 <div style={{ padding: "16px 0" }}>

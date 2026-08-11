@@ -11,9 +11,39 @@
     --sub-bg-active: {{ block.settings.accent_color }}0f;
     --sub-shadow-active: 0 0 0 3px {{ block.settings.accent_color }}26;
   }
+
+  {%- comment -%}
+    Merchant CSS from the block's "Custom CSS" setting. Emitted last so it
+    overrides subscription.css at equal specificity, since this tag already
+    follows that stylesheet's link.
+
+    Written raw rather than wrapped in a selector: merchants write complete
+    rules, and wrapping would only allow bare property declarations.
+
+    The replace filters are forgiveness, not security. Pasting a whole style
+    element is common, and its closing tag would otherwise terminate this one
+    early and spill the remainder onto the page as visible text. The needles are
+    assembled with append because a literal closing style tag cannot appear
+    inside a style element without ending it.
+
+    strip_html is deliberately avoided: it strips everything between angle
+    brackets and so would mangle valid CSS media queries that use a less-than
+    comparison.
+  {%- endcomment -%}
+  {%- if block.settings.custom_css != blank -%}
+  {%- assign style_close = '</' | append: 'style>' -%}
+  {%- assign style_open  = '<'  | append: 'style>' -%}
+  {{ block.settings.custom_css | replace: style_close, '' | replace: style_open, '' }}
+  {%- endif -%}
 </style>
 
-<div class="sub-widget" id="sub-widget-{{ block.id }}">
+{%- comment -%}
+  data-design is rendered here rather than fetched, so the layout is correct on
+  first paint. The app admin (Settings → Widget designs) can still override it,
+  but that override goes through the app proxy and is therefore best-effort;
+  this is the value that always works.
+{%- endcomment -%}
+<div class="sub-widget" id="sub-widget-{{ block.id }}" data-design="{{ block.settings.design }}">
 
   {%- comment -%}
     Per-variant map of the selling plans actually allocated to each variant:
@@ -131,6 +161,18 @@
   "templates": ["product"],
   "settings": [
     {
+      "type": "select",
+      "id": "design",
+      "label": "Design",
+      "info": "Overridden by Settings → Widget designs in the Smart Subscriptions app when that app is reachable.",
+      "options": [
+        { "value": "default",  "label": "Default — standard option list" },
+        { "value": "arctic",   "label": "Arctic — save badge inline, frequency picker" },
+        { "value": "ribbon",   "label": "Ribbon — save badge on a corner ribbon" }
+      ],
+      "default": "arctic"
+    },
+    {
       "type": "color",
       "id": "accent_color",
       "label": "Accent color",
@@ -141,6 +183,12 @@
       "id": "show_savings",
       "label": "Show savings callout",
       "default": true
+    },
+    {
+      "type": "textarea",
+      "id": "custom_css",
+      "label": "Custom CSS",
+      "info": "Write full CSS rules. Useful selectors: .sub-widget, .sub-option, .sub-option--active, .sub-option__title, .sub-option__price, .sub-option__badge, .sub-widget__savings"
     }
   ]
 }

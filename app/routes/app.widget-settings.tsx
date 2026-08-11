@@ -333,7 +333,8 @@ function WidgetPreview({
                     <span style={{ fontSize: "14px", color: textColor, fontWeight: selected === "subscribe" ? 600 : 400 }}>
                       Subscribe &amp; save
                     </span>
-                    {/* Arctic only: inline badge */}
+                    {/* Arctic only: inline badge. Dropdown puts its badge after
+                        the price instead, so the frequency picker leads. */}
                     {design === "arctic" && activeDiscount > 0 && (
                       <span style={{
                         marginLeft: "8px", fontSize: "10px", fontWeight: 700,
@@ -359,7 +360,7 @@ function WidgetPreview({
                 </div>
               </div>
 
-              {/* Deliver every — shown when selected */}
+              {/* Deliver every — shown when the subscribe option is selected. */}
               {selected === "subscribe" && (
                 <div
                   style={{ marginLeft: "28px", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "#666" }}

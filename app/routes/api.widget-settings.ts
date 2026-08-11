@@ -1,23 +1,23 @@
 // app/routes/api.widget-settings.ts
-// Public endpoint — returns widget settings for a shop (used by extension JS)
+// Public endpoint — returns widget settings for a shop.
+//
+// The theme extension calls the app-proxy twin of this route
+// (/apps/subscriptions/widget-settings) instead, because that is same-origin
+// from the storefront and needs no hardcoded app URL. This direct route is kept
+// for anything calling the app host directly.
 
 import type { LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import prisma from "../db.server";
-
-const DEFAULTS = {
-  primaryColor:  "#5B4FCB",
-  badgeColor:    "#F5A623",
-  borderRadius:  10,
-  showOnetime:   true,
-  design:        "arctic",
-};
+import { getWidgetSettings } from "../lib/widget-settings.server";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin":  "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
-  "Cache-Control":                "public, max-age=300", // 5-min CDN cache
+  // Short on purpose. These settings are edited in the admin and the merchant
+  // expects to see the result immediately; a long cache reads as "my change
+  // didn't save".
+  "Cache-Control":                "public, max-age=30",
 };
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -33,22 +33,5 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return json({ error: "Missing ?shop= parameter" }, { status: 400, headers: CORS_HEADERS });
   }
 
-  let s: Record<string, any> = {};
-  try {
-    s = (await prisma.appSettings.findUnique({ where: { shop } }) as any) ?? {};
-  } catch (err) {
-    console.error("[widget-settings] DB error:", err);
-  }
-
-  return json(
-    {
-      primaryColor:  s.widgetPrimaryColor  ?? DEFAULTS.primaryColor,
-      badgeColor:    s.widgetBadgeColor    ?? DEFAULTS.badgeColor,
-      borderRadius:  s.widgetBorderRadius  ?? DEFAULTS.borderRadius,
-      showOnetime:   s.widgetShowOnetime   ?? DEFAULTS.showOnetime,
-      design:        s.widgetDesign        ?? DEFAULTS.design,
-    },
-    { headers: CORS_HEADERS },
-  );
+  return json(await getWidgetSettings(shop), { headers: CORS_HEADERS });
 }
-

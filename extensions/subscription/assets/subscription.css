@@ -24,6 +24,10 @@ fieldset[data-type="selling_plan"],
   --sub-text-muted:    #6b7280;
   --sub-radius:        12px;
   --sub-radius-sm:     8px;
+  /* Separate from --sub-accent so the admin's badge colour can differ from the
+     accent colour. Defaults to the accent, so themes that never set it look
+     exactly as before. */
+  --sub-badge:         var(--sub-accent);
   --sub-shadow-active: 0 0 0 3px rgba(249, 115, 22, 0.15);
   --sub-transition:    0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -169,7 +173,7 @@ fieldset[data-type="selling_plan"],
 .sub-option__badge {
   display: inline-flex;
   align-items: center;
-  background: var(--sub-accent);
+  background: var(--sub-badge);
   color: #fff;
   font-size: 10px;
   font-weight: 800;
@@ -238,4 +242,87 @@ fieldset[data-type="selling_plan"],
   .sub-option__inner { padding: 12px 14px; }
   .sub-option__title { font-size: 13px; }
   .sub-option__price { font-size: 14px; }
+}
+
+/* ─── Design variants ──────────────────────────────────────────
+   Selected in the app admin (Settings → Widget designs) and applied by
+   subscription.js as data-design on the widget root. Anything without a
+   data-design keeps the original look, so existing storefronts are unchanged.
+   ──────────────────────────────────────────────────────────── */
+
+/* Default — flat Shopify-style list: one bordered group, rows divided by
+   hairlines rather than each row being its own card. */
+.sub-widget[data-design="default"] .sub-widget__options {
+  border: 1.5px solid var(--sub-border);
+  border-radius: var(--sub-radius);
+  overflow: hidden;
+  gap: 0;
+}
+.sub-widget[data-design="default"] .sub-option {
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--sub-border);
+  box-shadow: none;
+  transform: none;
+}
+.sub-widget[data-design="default"] .sub-option:last-child { border-bottom: none; }
+.sub-widget[data-design="default"] .sub-option--active {
+  background: var(--sub-bg-active);
+  box-shadow: none;
+  transform: none;
+}
+
+/* Arctic — the per-plan rows collapse into one row carrying a frequency
+   dropdown. The originals stay in the DOM (their radios drive the cart) and are
+   hidden with !important so applyVariantPlans' inline display cannot reveal
+   them; availability is reflected in the dropdown's options instead. */
+.sub-widget[data-design="arctic"] .sub-option[data-plan-id] {
+  display: none !important;
+}
+.sub-arctic { display: none; }                      /* only shown under arctic */
+.sub-widget[data-design="arctic"] .sub-arctic { display: block; }
+
+.sub-arctic__body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.sub-arctic__freq {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sub-text-muted);
+}
+.sub-arctic__select {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--sub-border);
+  border-radius: var(--sub-radius-sm);
+  background: var(--sub-bg);
+  color: var(--sub-text);
+  cursor: pointer;
+  max-width: 160px;
+}
+.sub-arctic__select:focus-visible {
+  outline: 2px solid var(--sub-accent);
+  outline-offset: 1px;
+}
+
+/* Ribbon — the save badge becomes a corner ribbon instead of sitting inline
+   next to the plan name. */
+.sub-widget[data-design="ribbon"] .sub-option { overflow: visible; }
+.sub-widget[data-design="ribbon"] .sub-option__badge {
+  position: absolute;
+  top: -9px;
+  left: -6px;
+  z-index: 1;
+  border-radius: var(--sub-radius-sm);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.sub-widget[data-design="ribbon"] .sub-option__title {
+  display: inline-flex;
+  align-items: center;
 }

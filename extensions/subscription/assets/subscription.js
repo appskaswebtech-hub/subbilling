@@ -113,12 +113,322 @@
 
     // No subscription for this variant → hide the entire widget.
     widget.style.display = anyVisible ? '' : 'none';
+
+    // Arctic collapses the plan rows into one dropdown, so its options have to
+    // be rebuilt whenever variant availability changes.
+    refreshFrequencyRow(widget);
+  }
+
+  // ─── Arctic design ──────────────────────────────────────────
+  // Arctic shows a single "Subscribe & save" row with a "Deliver every"
+  // dropdown instead of one row per plan.
+  //
+  // The original plan rows stay in the DOM and keep their radios — those radios
+  // are what drive the hidden selling_plan input and therefore the cart. The
+  // dropdown only *selects* one of them. Replacing them would mean
+  // reimplementing variant filtering, price sync and cart wiring.
+
+  function availablePlanCards(widget) {
+    // applyVariantPlans sets inline display:none on plans the current variant
+    // cannot use, so that is the source of truth for what to offer.
+    return Array.from(widget.querySelectorAll('.sub-option[data-plan-id]'))
+      .filter((card) => card.style.display !== 'none');
+  }
+
+  function buildFrequencyRow(widget) {
+    if (widget.querySelector('.sub-arctic')) return; // already built
+
+    const row = document.createElement('label');
+    row.className = 'sub-option sub-arctic';
+    row.innerHTML =
+      '<span class="sub-option__inner">' +
+        '<span class="sub-option__left">' +
+          '<span class="sub-option__dot"></span>' +
+          '<span class="sub-arctic__body">' +
+            '<span class="sub-option__title">' +
+              '<span class="sub-arctic__label">Subscribe &amp; save</span>' +
+              '<span class="sub-option__badge sub-arctic__badge" hidden></span>' +
+            '</span>' +
+            '<span class="sub-arctic__freq">Deliver every ' +
+              '<select class="sub-arctic__select" aria-label="Delivery frequency"></select>' +
+            '</span>' +
+          '</span>' +
+        '</span>' +
+        '<span class="sub-option__price sub-arctic__price"></span>' +
+      '</span>';
+
+    const options = widget.querySelector('.sub-widget__options');
+    if (!options) return;
+    options.appendChild(row);
+
+    const select = row.querySelector('.sub-arctic__select');
+
+    // Changing the dropdown selects the matching hidden radio and lets the
+    // existing change handlers do the real work (active state, selling_plan).
+    select.addEventListener('change', () => selectArcticPlan(widget, select.value));
+
+    // Clicking anywhere else on the row picks whatever the dropdown shows.
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.sub-arctic__select')) return;
+      e.preventDefault();
+      selectArcticPlan(widget, select.value);
+    });
+  }
+
+  function selectArcticPlan(widget, planId) {
+    const card  = widget.querySelector('.sub-option[data-plan-id="' + planId + '"]');
+    const radio = card && card.querySelector('.sub-option__radio');
+    if (!radio) return;
+    radio.checked = true;
+    radio.dispatchEvent(new Event('change', { bubbles: true }));
+    refreshFrequencyRow(widget);
+  }
+
+  function refreshFrequencyRow(widget) {
+    const row = widget.querySelector('.sub-arctic');
+    if (!row) return;
+
+    const select = row.querySelector('.sub-arctic__select');
+    const cards  = availablePlanCards(widget);
+
+    // No subscription available for this variant → nothing to offer.
+    row.style.display = cards.length ? '' : 'none';
+    if (!cards.length) return;
+
+    const checked  = widget.querySelector('.sub-option__radio:checked');
+    const checkedId = checked && checked.value ? String(checked.value) : '';
+
+    // Rebuild options only when the available set actually changed, so the
+    // merchant's current choice is not reset on every 400ms variant poll.
+    const signature = cards.map((c) => c.dataset.planId).join(',');
+    if (select.dataset.signature !== signature) {
+      select.dataset.signature = signature;
+      select.innerHTML = '';
+      cards.forEach((card) => {
+        const opt = document.createElement('option');
+        opt.value = card.dataset.planId;
+        const title = card.querySelector('.sub-option__title');
+        // Strip the badge text so the option reads "Monthly Subscription",
+        // not "Monthly Subscription SAVE 20%".
+        const badge = title && title.querySelector('.sub-option__badge');
+        opt.textContent = title
+          ? title.textContent.replace(badge ? badge.textContent : '', '').trim()
+          : card.dataset.planId;
+        select.appendChild(opt);
+      });
+    }
+
+    // Follow the real selection when it is one of ours; otherwise keep showing
+    // the dropdown's current plan so the row still reads sensibly.
+    const isPlanChecked = cards.some((c) => c.dataset.planId === checkedId);
+    if (isPlanChecked) select.value = checkedId;
+
+    const shownId   = select.value || cards[0].dataset.planId;
+    const shownCard = cards.find((c) => c.dataset.planId === shownId) || cards[0];
+
+    const priceEl = row.querySelector('.sub-arctic__price');
+    const price   = parseInt(shownCard.dataset.planPrice, 10);
+    if (priceEl) priceEl.textContent = isNaN(price) ? '' : formatMoney(price);
+
+    const badgeEl  = row.querySelector('.sub-arctic__badge');
+    const discount = parseFloat(shownCard.dataset.discount);
+    if (badgeEl) {
+      if (discount > 0) {
+        badgeEl.textContent = 'SAVE ' + discount + '%';
+        badgeEl.hidden = false;
+      } else {
+        badgeEl.hidden = true;
+      }
+    }
+
+    row.classList.toggle('sub-option--active', isPlanChecked);
+  }
+
+  // ─── Admin widget settings ──────────────────────────────────
+  // Colours, corner radius and the one-time option are configured in the app's
+  // admin (Settings → Subscription widget) and stored in the app's database, so
+  // the theme cannot read them at render time — they are fetched here.
+  //
+  // Requested through Shopify's app proxy on the shop's own domain, which keeps
+  // this same-origin (no CORS, no preflight) and means the theme never has to
+  // know the app's URL. A hardcoded app URL goes stale every time the dev
+  // tunnel rotates.
+  // Bump when changing widget behaviour. Logged on init and exposed on
+  // window.__subWidget so "is the new code actually live?" is one console line
+  // rather than a round of screenshots — the theme asset is CDN-cached and a
+  // deploy is easy to believe has landed when it has not.
+  const WIDGET_BUILD = '2026-08-07.no-dropdown';
+
+  // One storefront path — the proxy REPLACES `/apps/subscriptions` with the
+  // configured proxy URL and appends the rest, so this same request lands on
+  // either `<app>/apps/subscriptions/widget-settings` or `<app>/widget-settings`
+  // depending on whether the deployed proxy URL kept its subpath. `shopify app
+  // dev` rewrites that URL wholesale and a known CLI bug drops the subpath
+  // (Shopify/cli#2905), so the app serves BOTH paths and this works either way.
+  const SETTINGS_URL = '/apps/subscriptions/widget-settings';
+
+  function applySettings(widget, s) {
+    const style = widget.style;
+
+    if (s.primaryColor) {
+      style.setProperty('--sub-accent',        s.primaryColor);
+      style.setProperty('--sub-border-active', s.primaryColor);
+      // Alpha suffixes match the Liquid template's inline style, so the app
+      // settings and the theme setting produce the same visual treatment.
+      style.setProperty('--sub-accent-light',  s.primaryColor + '18');
+      style.setProperty('--sub-bg-active',     s.primaryColor + '0f');
+      style.setProperty('--sub-accent-ring',   s.primaryColor + '26');
+      style.setProperty('--sub-shadow-active', '0 0 0 3px ' + s.primaryColor + '26');
+    }
+
+    if (s.badgeColor) style.setProperty('--sub-badge', s.badgeColor);
+
+    if (s.borderRadius !== undefined && s.borderRadius !== null) {
+      style.setProperty('--sub-radius', s.borderRadius + 'px');
+    }
+
+    // The one-time option is the first .sub-option and is the only one without
+    // a plan id. Hidden rather than removed so the rest of the widget's logic
+    // (which resets to one-time on variant change) still finds it.
+    if (s.showOnetime === false) {
+      const onetime = widget.querySelector('.sub-option:not([data-plan-id])');
+      if (onetime) onetime.style.display = 'none';
+    }
+
+    // Layout variant. CSS keys off this for `default` and `ribbon`; `arctic`
+    // additionally needs the dropdown row built.
+    // Overrides whatever Liquid rendered. When the app is unreachable the
+    // markup's design simply stands, which is why colours have always worked
+    // while the design did not — colours had no such fallback to lose.
+    if (s.design) {
+      widget.dataset.design = s.design;
+      applyDesign(widget);
+    }
+
+    // Keep the Arctic row's selected state in step when the shopper picks
+    // one-time (or any plan) through the original controls.
+    widget.addEventListener('change', function (e) {
+      if (e.target.classList && e.target.classList.contains('sub-option__radio')) {
+        refreshFrequencyRow(widget);
+      }
+    });
+  }
+
+  // On-page diagnostic, shown ONLY with ?subdebug=1 in the URL so shoppers never
+  // see it. Exists because "the design isn't applying" has been unanswerable
+  // without devtools: this turns it into a screenshot.
+  function renderDebug(report) {
+    let on = false;
+    try { on = new URLSearchParams(window.location.search).get('subdebug') === '1'; } catch (e) {}
+    if (!on) return;
+
+    let box = document.getElementById('sub-debug');
+    if (!box) {
+      box = document.createElement('pre');
+      box.id = 'sub-debug';
+      box.style.cssText =
+        'position:fixed;bottom:8px;right:8px;z-index:99999;max-width:min(420px,90vw);' +
+        'margin:0;padding:10px 12px;background:#111;color:#0f0;font:11px/1.5 monospace;' +
+        'border-radius:6px;white-space:pre-wrap;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+      document.body.appendChild(box);
+    }
+
+    const w = document.querySelector('.sub-widget');
+    box.textContent =
+      'SUBSCRIPTION WIDGET DEBUG\n' +
+      'build          : ' + report.build + '\n' +
+      'settings url   : ' + report.url + '\n' +
+      'settings status: ' + (report.status === null ? 'pending…' : report.status) + '\n' +
+      'design (theme) : ' + (report.designFromTheme || '(none)') + '\n' +
+      'design (app)   : ' + (report.design || '(none)') + '\n' +
+      'design applied : ' + (w ? (w.dataset.design || '(none)') + '' : '(no widget)') + '\n' +
+      'frequency row  : ' + (document.querySelector('.sub-arctic') ? 'built' : 'not built');
+  }
+
+  function loadSettings(widgets) {
+    // Shopify.shop is present on storefront pages; the proxy also appends the
+    // shop itself, so this is belt-and-braces for direct calls.
+    const shop = (window.Shopify && window.Shopify.shop) || '';
+    const url  = SETTINGS_URL + (shop ? '?shop=' + encodeURIComponent(shop) : '');
+
+    // Diagnostics, deliberately. An earlier version swallowed every failure,
+    // which made "the design isn't applying" indistinguishable from "the app
+    // is unreachable" and cost several rounds of guessing. One console line
+    // should now answer it.
+    const report = {
+      build:        WIDGET_BUILD,
+      url:          url,
+      status:       null,
+      settings:     null,
+      design:       null,
+      designFromTheme: widgets[0] ? widgets[0].dataset.design || null : null,
+    };
+    window.__subWidget = report;
+    console.log('[KAS] subscription widget build ' + WIDGET_BUILD);
+    renderDebug(report);
+
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) {
+        report.status = r.status;
+        renderDebug(report);
+        if (!r.ok) {
+          console.warn(
+            '[KAS] widget settings request failed (' + r.status + ') at ' + url +
+            ' — the app proxy is not reaching the app, so admin colours and the ' +
+            'chosen design cannot be applied. Check the App proxy URL in the ' +
+            'Partner Dashboard.'
+          );
+          return null;
+        }
+        return r.json();
+      })
+      .then(function (s) {
+        if (!s) return;
+        if (s.error) {
+          console.warn('[KAS] widget settings returned an error: ' + s.error);
+          return;
+        }
+        report.settings = s;
+        report.design   = s.design;
+        renderDebug(report);
+        if (!s.design) {
+          console.log('[KAS] no widget design saved — using the theme\'s own styling.');
+        }
+        widgets.forEach(function (w) { applySettings(w, s); });
+      })
+      .catch(function (err) {
+        // Styling stays an enhancement — the widget remains fully usable on the
+        // theme's own accent colour. But say so rather than failing silently.
+        report.status = 'unreachable';
+        renderDebug(report);
+        console.warn(
+          '[KAS] could not reach the app for widget settings at ' + url + ' — ' +
+          (err && err.message ? err.message : 'network error') +
+          '. The widget falls back to the theme\'s styling.'
+        );
+      });
+  }
+
+  // Designs whose plan rows collapse into a single row with a frequency picker.
+  const COLLAPSING_DESIGNS = ['arctic'];
+
+  function applyDesign(widget) {
+    if (COLLAPSING_DESIGNS.indexOf(widget.dataset.design) === -1) return;
+    buildFrequencyRow(widget);   // idempotent — returns early if already built
+    refreshFrequencyRow(widget);
   }
 
   function init() {
     const widgets = document.querySelectorAll('.sub-widget');
     if (!widgets.length) return;
     widgets.forEach(initWidget);
+
+    // Build from the markup FIRST. Liquid renders data-design at page load, so
+    // the layout is right on first paint and does not depend on the app being
+    // reachable — the settings fetch below can only override it.
+    widgets.forEach(applyDesign);
+
+    loadSettings(widgets);
   }
 
   function initWidget(widget) {
