@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import {
   useLoaderData,
+  useActionData,
   useNavigate,
   useSubmit,
   useSearchParams,
@@ -25,35 +26,19 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { IconCell, CellIcon, IconCalendar, rowColorFor } from "../components/TableIcons";
+import { toContractGid } from "../lib/subscription-sync.server";
+import {
+  pauseContract,
+  activateContract,
+  cancelContract,
+} from "../lib/subscription-contract.server";
+import { backfillContracts } from "../lib/subscription-backfill.server";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 const PAGE_SIZE = 20;
 
-// ─── Mutations ───────────────────────────────────────────────
-const PAUSE_MUTATION = `
-  mutation subscriptionContractPause($subscriptionContractId: ID!) {
-    subscriptionContractPause(subscriptionContractId: $subscriptionContractId) {
-      contract { id status }
-      userErrors { field message }
-    }
-  }
-`;
-const ACTIVATE_MUTATION = `
-  mutation subscriptionContractActivate($subscriptionContractId: ID!) {
-    subscriptionContractActivate(subscriptionContractId: $subscriptionContractId) {
-      contract { id status }
-      userErrors { field message }
-    }
-  }
-`;
-const CANCEL_MUTATION = `
-  mutation subscriptionContractCancel($subscriptionContractId: ID!) {
-    subscriptionContractCancel(subscriptionContractId: $subscriptionContractId) {
-      contract { id status }
-      userErrors { field message }
-    }
-  }
-`;
+// Pause/resume/cancel live in subscription-contract.server.ts — this route used
+// to carry its own copies of the same three mutations.
 
 // ─── Design tokens ───────────────────────────────────────────
 const T = {
@@ -152,34 +137,65 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const formData           = await request.formData();
-  const localId            = formData.get("id")     as string;
-  const newStatus          = formData.get("status") as string;
 
-  const sub = await prisma.subscription.findFirst({ where: { id: localId, shop: session.shop } });
-  if (!sub) return json({ error: "Subscription not found" }, { status: 404 });
-
-  let mutation: string;
-  let payloadKey: string;
-  if (newStatus === "PAUSED") {
-    mutation = PAUSE_MUTATION;
-    payloadKey = "subscriptionContractPause";
-  } else if (newStatus === "CANCELLED") {
-    mutation = CANCEL_MUTATION;
-    payloadKey = "subscriptionContractCancel";
-  } else {
-    mutation = ACTIVATE_MUTATION;
-    payloadKey = "subscriptionContractActivate";
+  // ── Pull existing contracts in from Shopify ────────────────
+  // The local table is only written by the subscription_contracts webhooks, so
+  // contracts that predate the app's install never appear here. Manual rather
+  // than automatic: this walks the Admin API, and running it on every page load
+  // would be a lot of requests for a result that rarely changes.
+  if (formData.get("intent") === "sync") {
+    try {
+      const summary = await backfillContracts(admin.graphql, session.shop);
+      return json({ ok: true, sync: summary });
+    } catch (err: any) {
+      return json({ error: `Sync failed: ${err?.message ?? "unknown error"}` }, { status: 502 });
+    }
   }
 
-  const res    = await admin.graphql(mutation, { variables: { subscriptionContractId: sub.shopifyContractId } });
-  const result = await res.json();
-  const errors = (result?.data?.[payloadKey]?.userErrors ?? []) as Array<{ field: string[]; message: string }>;
+  const rawId       = formData.get("id")     as string;
+  const newStatus   = formData.get("status") as string;
 
-  if (errors.length > 0)
-    return json({ error: errors.map((e) => `${e.field?.join(".") ?? "error"}: ${e.message}`).join(" | ") });
+  // The local Subscription table is a MIRROR of Shopify, and an incomplete one —
+  // contracts created before the app was installed have no row. The dashboard
+  // lists contracts live from Shopify, so requiring a local row here made almost
+  // every dashboard action fail with "Subscription not found".
+  //
+  // The row is therefore optional: it is only needed to translate this page's
+  // local cuid into a contract id. A GID or bare numeric id resolves on its own.
+  const sub = await prisma.subscription.findFirst({
+    where: {
+      shop: session.shop,
+      OR: [{ id: rawId }, { shopifyContractId: toContractGid(rawId) }],
+    },
+  });
 
-  await prisma.subscription.update({ where: { id: localId }, data: { status: newStatus } });
-  return json({ ok: true });
+  const looksLikeContractId = /^(gid:\/\/shopify\/SubscriptionContract\/)?\d+$/.test(rawId ?? "");
+  const contractGid = sub?.shopifyContractId ?? (looksLikeContractId ? toContractGid(rawId) : null);
+
+  // Only unresolvable when there is no local row AND the id is not a contract id
+  // — i.e. a cuid we have nothing to map.
+  if (!contractGid) return json({ error: "Subscription not found" }, { status: 404 });
+
+  // Shared helpers: they take a shop and a GID, need no local row, and already
+  // check top-level errors then userErrors before reporting success.
+  const run =
+    newStatus === "PAUSED"    ? pauseContract    :
+    newStatus === "CANCELLED" ? cancelContract   :
+                                activateContract;
+
+  const result = await run(session.shop, contractGid);
+  if (!result.ok) return json({ error: result.error });
+
+  // Best-effort mirror. updateMany matches zero rows without erroring, so a
+  // contract with no local row simply skips this instead of failing.
+  const status = result.status ?? newStatus;
+  await prisma.subscription.updateMany({
+    where: { shop: session.shop, shopifyContractId: contractGid },
+    data:  { status },
+  });
+
+  // Report what Shopify actually did, not what was requested.
+  return json({ ok: true, status });
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
@@ -397,6 +413,11 @@ function RowMenu({
   };
   const dangerItem: React.CSSProperties = { ...itemStyle, color: "#A32D2D" };
 
+  // Every item in this menu — View details, Pause, Resume, Cancel — is
+  // unavailable once cancelled, so the trigger would open an empty box.
+  // Drop the whole control rather than leave a dead one.
+  if (status === "CANCELLED") return null;
+
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
       <button
@@ -443,13 +464,18 @@ function RowMenu({
             gap:          "1px",
           }}
         >
-          <button style={itemStyle} onClick={() => { setOpen(false); onView(); }}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
-            View details
-          </button>
+          {/* Not offered once cancelled: the editor it opens refuses the edit
+              anyway ("this subscription is cancelled and can no longer be
+              edited"), so the item only leads to a dead end. */}
+          {status !== "CANCELLED" && (
+            <button style={itemStyle} onClick={() => { setOpen(false); onView(); }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              View details
+            </button>
+          )}
 
           {status === "ACTIVE" && (
             <button style={itemStyle} onClick={() => { setOpen(false); onPause(); }}>
@@ -493,6 +519,16 @@ export default function Subscriptions() {
   const [params]    = useSearchParams();
   const navigation  = useNavigation();
   const revalidator = useRevalidator();
+  const actionData  = useActionData<typeof action>();
+
+  // The backfill walks the Admin API, so it is slow enough to need its own
+  // in-flight state rather than reusing the revalidator's.
+  const isSyncing = navigation.state !== "idle" && navigation.formData?.get("intent") === "sync";
+  const syncResult = (actionData as { sync?: {
+    created: number; updated: number;
+    failed: Array<{ id: string; reason: string }>;
+    truncated: boolean;
+  } } | undefined)?.sync;
 
   const [searchInput,  setSearchInput]  = useState(params.get("search") ?? "");
   const [actionError,  setActionError]  = useState<string | null>(null);
@@ -650,6 +686,23 @@ export default function Subscriptions() {
         {actionError && (
           <Banner tone="critical" title="Action failed" onDismiss={() => setActionError(null)}>
             <Text as="p">{actionError}</Text>
+          </Banner>
+        )}
+
+        {/* Sync result. Reported rather than silent — a partial import that
+            said nothing would look identical to a complete one. */}
+        {actionData && "error" in actionData && actionData.error && (
+          <Banner tone="critical" title="Sync failed">
+            <Text as="p">{String(actionData.error)}</Text>
+          </Banner>
+        )}
+        {syncResult && (
+          <Banner tone={syncResult.failed.length ? "warning" : "success"} title="Sync complete">
+            <Text as="p">
+              {syncResult.created} added · {syncResult.updated} updated
+              {syncResult.failed.length ? ` · ${syncResult.failed.length} failed: ${syncResult.failed[0].reason}` : ""}
+              {syncResult.truncated ? " · stopped at the page limit; run again for the rest" : ""}
+            </Text>
           </Banner>
         )}
         <div className="card-section">
@@ -1164,6 +1217,35 @@ export default function Subscriptions() {
             </Text>
             </div>
           </div>
+
+          {/* Pulls contracts that predate the app's webhooks into the local
+              table. "Refresh now" only re-reads what is already stored — if a
+              contract exists in Shopify but not here, only this brings it in. */}
+          <button
+            onClick={() => {
+              const fd = new FormData();
+              fd.append("intent", "sync");
+              submit(fd, { method: "post" });
+            }}
+            disabled={isSyncing}
+            style={{
+              display:      "flex",
+              alignItems:   "center",
+              gap:          "6px",
+              fontSize:     "13px",
+              padding:      "10px 20px",
+              border:       "0.5px solid var(--p-color-border-secondary)",
+              borderRadius: "8px",
+              background:   "var(--p-color-bg-surface)",
+              color:        "var(--p-color-text)",
+              cursor:       isSyncing ? "wait" : "pointer",
+              whiteSpace:   "nowrap",
+              opacity:      isSyncing ? 0.7 : 1,
+              marginRight:  "8px",
+            }}
+          >
+            {isSyncing ? "Syncing…" : "Sync from Shopify"}
+          </button>
 
           <button
             onClick={() => revalidator.revalidate()}

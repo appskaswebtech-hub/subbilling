@@ -630,17 +630,36 @@ function RowActionMenu({ contractId, status }: { contractId: string; status: str
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
+  // Posts to the Subscriptions page's action, which owns the pause/resume/
+  // cancel mutations. It used to post to "/app/subscriptions/action" — a route
+  // that does not exist — so every click fell through to the root catch-all and
+  // returned 405.
+  //
+  // `contractId` is the Shopify GID on the dashboard's live path and the Prisma
+  // cuid on its DB fallback; that action resolves either.
+  const STATUS_FOR: Record<"pause" | "resume" | "cancel", string> = {
+    pause:  "PAUSED",
+    resume: "ACTIVE",
+    cancel: "CANCELLED",
+  };
+
+  const busy  = fetcher.state !== "idle";
+  const error = (fetcher.data as { error?: string } | undefined)?.error;
+
   const submit = (action: "pause" | "resume" | "cancel") => {
+    if (busy) return;
     setOpen(false);
     fetcher.submit(
-      { action, contractId },
-      { method: "post", action: "/app/subscriptions/action" },
+      { id: contractId, status: STATUS_FOR[action] },
+      { method: "post", action: "/app/subscriptions" },
     );
   };
 
-  const canPause  = status === "ACTIVE";
-  const canResume = status === "PAUSED";
-  const canCancel = status === "ACTIVE" || status === "PAUSED";
+  // Disabled while a change is in flight so a second click cannot fire another
+  // billing-state mutation before the first settles.
+  const canPause  = status === "ACTIVE" && !busy;
+  const canResume = status === "PAUSED" && !busy;
+  const canCancel = (status === "ACTIVE" || status === "PAUSED") && !busy;
 
   const itemStyle = (enabled: boolean): React.CSSProperties => ({
     display: "block",
@@ -724,6 +743,32 @@ function RowActionMenu({ contractId, status }: { contractId: string; status: str
           >
             Cancel
           </button>
+        </div>
+      )}
+
+      {/* Nothing read fetcher.data before, so a failed pause/cancel was
+          indistinguishable from nothing happening — which is how the wrong
+          endpoint survived unnoticed until it started returning 405. */}
+      {error && (
+        <div
+          role="alert"
+          style={{
+            position: "absolute",
+            top: "100%",
+            right: 0,
+            marginTop: "4px",
+            zIndex: 11,
+            minWidth: "200px",
+            padding: "8px 10px",
+            background: "var(--p-color-bg-surface)",
+            border: "1px solid #E24B4A",
+            borderRadius: "6px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+            fontSize: "12px",
+            color: "#E24B4A",
+          }}
+        >
+          {error}
         </div>
       )}
     </div>

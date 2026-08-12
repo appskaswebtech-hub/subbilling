@@ -182,3 +182,103 @@ export async function applyContractToLocal(
 
   return result.count;
 }
+
+// ─── Next billing date arithmetic ────────────────────────────
+// Moved here from api.cron.billing.ts: the cron, the create webhook and the
+// backfill all need it, and a route importing another route to get it was the
+// wrong dependency direction.
+export function advanceBillingDate(from: Date, frequency: string): Date {
+  const d = new Date(from);
+  const f = frequency.toUpperCase().trim();
+
+  // Handle combined format like "2 WEEKLY", "3 DAILY"
+  const match     = f.match(/^(\d+)\s+(.+)$/);
+  const count     = match ? parseInt(match[1], 10) : 1;
+  const unit      = match ? match[2] : f;
+  const safeCount = Number.isFinite(count) && count > 0 ? count : 1;
+
+  // Exact matches first (normalised values from normaliseFrequency)
+  if (unit === "DAILY"   || unit === "DAY")   { d.setDate(d.getDate() + safeCount);         return d; }
+  if (unit === "BIWEEKLY")                    { d.setDate(d.getDate() + 14);                return d; }
+  if (unit === "WEEKLY"  || unit === "WEEK")  { d.setDate(d.getDate() + safeCount * 7);     return d; }
+  if (unit === "MONTHLY" || unit === "MONTH") {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + safeCount);
+    const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    d.setDate(Math.min(day, lastDay));
+    return d;
+  }
+  if (unit === "YEARLY"  || unit === "YEAR")  { d.setFullYear(d.getFullYear() + safeCount); return d; }
+
+  // Fallback — includes() check as last resort
+  if (unit.includes("DAY"))   { d.setDate(d.getDate() + safeCount);         return d; }
+  if (unit.includes("WEEK"))  { d.setDate(d.getDate() + safeCount * 7);     return d; }
+  if (unit.includes("YEAR"))  { d.setFullYear(d.getFullYear() + safeCount); return d; }
+  if (unit.includes("MONTH")) { d.setMonth(d.getMonth() + safeCount);       return d; }
+
+  console.warn(`[sync] advanceBillingDate: unrecognised frequency "${frequency}" — defaulting to +1 month`);
+  d.setMonth(d.getMonth() + 1);
+  return d;
+}
+
+// ─── Create-or-update ────────────────────────────────────────
+// applyContractToLocal only UPDATES — it cannot create, which is why contracts
+// that predate the webhook never appear locally. This is the create-or-update
+// counterpart, shared by the create webhook and the backfill so the two cannot
+// drift on field mapping.
+export interface UpsertResult {
+  created: boolean;
+  id:      string;
+}
+
+export async function upsertContractLocally(
+  shop:     string,
+  contract: ShopifyContract,
+): Promise<UpsertResult> {
+  const contractGid = toContractGid(contract.id);
+  const first       = contractLines(contract)[0] ?? null;
+
+  const status    = normaliseStatus(contract.status ?? "ACTIVE");
+  const frequency = normaliseFrequency(
+    contract.billingPolicy?.interval,
+    contract.billingPolicy?.intervalCount,
+  );
+
+  // nextBillingDate is non-null in the schema, but Shopify omits it on cancelled
+  // and expired contracts — project one forward rather than dropping the row.
+  const parsed          = contract.nextBillingDate ? new Date(contract.nextBillingDate) : null;
+  const nextBillingDate = (parsed && !isNaN(parsed.getTime()))
+    ? parsed
+    : advanceBillingDate(new Date(), frequency);
+
+  const data = {
+    customerEmail: contract.customer?.email ?? "",
+    productTitle:  first?.title             ?? "Unknown Product",
+    planName:      first?.sellingPlanName   ?? "Subscription",
+    price:         first?.currentPrice?.amount ? parseFloat(first.currentPrice.amount) : 0,
+    status,
+    frequency,
+    nextBillingDate,
+  };
+
+  const existing = await prisma.subscription.findUnique({
+    where:  { shopifyContractId: contractGid },
+    select: { id: true },
+  });
+
+  const row = await prisma.subscription.upsert({
+    where:  { shopifyContractId: contractGid },
+    update: data,
+    create: {
+      shop,
+      shopifyContractId: contractGid,
+      // customerId is required and has no default; an empty string is preferable
+      // to skipping the contract entirely when Shopify withholds the customer.
+      customerId: contract.customer?.id ?? "",
+      ...data,
+    },
+  });
+
+  return { created: !existing, id: row.id };
+}

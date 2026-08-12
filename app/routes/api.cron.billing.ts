@@ -92,40 +92,14 @@ function serializeError(err: unknown): string {
 //   DAILY, WEEKLY, BIWEEKLY, MONTHLY, YEARLY
 // Also handles raw Shopify intervals (DAY, WEEK, MONTH, YEAR)
 // and combined strings like "2 WEEKLY", "3 DAILY"
-export function advanceBillingDate(from: Date, frequency: string): Date {
-  const d = new Date(from);
-  const f = frequency.toUpperCase().trim();
-
-  // Handle combined format like "2 WEEKLY", "3 DAILY"
-  const match     = f.match(/^(\d+)\s+(.+)$/);
-  const count     = match ? parseInt(match[1], 10) : 1;
-  const unit      = match ? match[2] : f;
-  const safeCount = Number.isFinite(count) && count > 0 ? count : 1;
-
-  // Exact matches first (normalised values from normaliseFrequency)
-  if (unit === "DAILY"   || unit === "DAY")   { d.setDate(d.getDate() + safeCount);         return d; }
-  if (unit === "BIWEEKLY")                    { d.setDate(d.getDate() + 14);                return d; }
-  if (unit === "WEEKLY"  || unit === "WEEK")  { d.setDate(d.getDate() + safeCount * 7);     return d; }
-  if (unit === "MONTHLY" || unit === "MONTH") {
-    const day = d.getDate();
-    d.setDate(1);
-    d.setMonth(d.getMonth() + safeCount);
-    const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    d.setDate(Math.min(day, lastDay));
-    return d;
-  }
-  if (unit === "YEARLY"  || unit === "YEAR")  { d.setFullYear(d.getFullYear() + safeCount); return d; }
-
-  // Fallback — includes() check as last resort
-  if (unit.includes("DAY"))   { d.setDate(d.getDate() + safeCount);         return d; }
-  if (unit.includes("WEEK"))  { d.setDate(d.getDate() + safeCount * 7);     return d; }
-  if (unit.includes("YEAR"))  { d.setFullYear(d.getFullYear() + safeCount); return d; }
-  if (unit.includes("MONTH")) { d.setMonth(d.getMonth() + safeCount);       return d; }
-
-  console.warn(`[cron] advanceBillingDate: unrecognised frequency "${frequency}" — defaulting to +1 month`);
-  d.setMonth(d.getMonth() + 1);
-  return d;
-}
+// Moved to app/lib/subscription-sync.server.ts, which the cron, the create
+// webhook and the backfill all share.
+//
+// Deliberately NOT re-exported from here: Remix strips only loader/action/
+// headers from a route's client bundle, so any other export pulls the
+// .server module in with it and the build fails with "Server-only module
+// referenced by client". Import it from the lib instead.
+import { advanceBillingDate } from "../lib/subscription-sync.server";
 
 // ─── Core billing logic ───────────────────────────────────────
 async function runBilling() {

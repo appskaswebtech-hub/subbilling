@@ -4,13 +4,14 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { advanceBillingDate } from "./api.cron.billing";
 import {
   SUBSCRIPTION_CONTRACT_QUERY,
+  advanceBillingDate,
   applyContractToLocal,
   normaliseFrequency,
   normaliseStatus,
   toContractGid,
+  upsertContractLocally,
 } from "../lib/subscription-sync.server";
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -60,40 +61,32 @@ export async function action({ request }: ActionFunctionArgs) {
 
       console.log(`[Webhook] Creating subscription — frequency: ${frequency}, nextBillingDate: ${nextBillingDate.toISOString()}`);
 
-      const newSub = await prisma.subscription.upsert({
-        where:  { shopifyContractId: contractId },
-        update: {
-          status:          normaliseStatus(status),
-          nextBillingDate,
-          customerEmail,
-          productTitle,
-          planName,
-          price:           parseFloat(priceAmount),
-          frequency,
+      // Field mapping lives in upsertContractLocally so this and the backfill
+      // cannot drift. The merge below preserves this handler's own behaviour:
+      // when the GraphQL fetch fails, it still falls back to the raw webhook
+      // payload rather than writing an empty row.
+      const merged = {
+        id:              contractId,
+        status,
+        nextBillingDate: contract?.nextBillingDate ?? null,
+        customer: {
+          id:    customerId,
+          email: customerEmail,
         },
-        create: {
-          shop,
-          shopifyContractId: contractId,
-          customerId,
-          customerEmail,
-          productTitle,
-          planName,
-          status:          normaliseStatus(status),
-          price:           parseFloat(priceAmount),
-          frequency,
-          nextBillingDate,
-        },
-      });
+        billingPolicy: { interval, intervalCount },
+        lines:         contract?.lines ?? null,
+      };
+      const { id: localSubId } = await upsertContractLocally(shop, merged);
 
       // Only create initial billing attempt for brand new subscriptions
       const existingAttempt = await prisma.billingAttempt.findFirst({
-        where: { subscriptionId: newSub.id },
+        where: { subscriptionId: localSubId },
       });
 
       if (!existingAttempt) {
         await prisma.billingAttempt.create({
           data: {
-            subscriptionId: newSub.id,
+            subscriptionId: localSubId,
             amount:         parseFloat(priceAmount),
             status:         "SUCCESS",
           },

@@ -444,9 +444,14 @@ export default function SubscriptionDetail() {
   const canPause  = s.status === "ACTIVE";
   const canCancel = s.status !== "CANCELLED";
 
-  const shopifyAdminUrl = `https://${s.shop}/admin/subscriptions/${
-    s.shopifyContractId.split("/").pop()
-  }`;
+  // Shopify admin has NO standalone page for a subscription contract —
+  // /admin/subscriptions/<id> 404s. Contracts are shown on the customer's page,
+  // so that is where this links.
+  const storeHandle    = s.shop.replace(/\.myshopify\.com$/, "");
+  const customerNumId  = s.customerId?.split("/").pop() ?? "";
+  const shopifyAdminUrl = customerNumId
+    ? `https://admin.shopify.com/store/${storeHandle}/customers/${customerNumId}`
+    : null;
 
   const successAttempts = s.billingAttempts.filter((a) => a.status === "SUCCESS");
   const failedAttempts  = s.billingAttempts.filter((a) => a.status === "FAILED");
@@ -576,20 +581,29 @@ export default function SubscriptionDetail() {
                 {isSubmitting && activeIntent === "cancel" ? "Cancelling…" : "Cancel"}
               </button>
             )}
-            <button
-              onClick={() => window.open(shopifyAdminUrl, "_blank")}
-              style={{
-                background:   "var(--p-color-bg-surface)",
-                color:        "var(--p-color-text-subdued)",
-                border:       "0.5px solid var(--p-color-border-secondary)",
-                padding:      "9px 14px",
-                borderRadius: "10px",
-                fontSize:     "13px",
-                cursor:       "pointer",
-              }}
-            >
-              Shopify Admin ↗
-            </button>
+            {/* Hidden when the customer is unknown (no URL to build), and once
+                cancelled — matching the other header actions, none of which
+                apply in that state. */}
+            {shopifyAdminUrl && s.status !== "CANCELLED" && (
+              <a
+                href={shopifyAdminUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  background:     "var(--p-color-bg-surface)",
+                  color:          "var(--p-color-text-subdued)",
+                  border:         "0.5px solid var(--p-color-border-secondary)",
+                  padding:        "9px 14px",
+                  borderRadius:   "10px",
+                  fontSize:       "13px",
+                  cursor:         "pointer",
+                  textDecoration: "none",
+                  display:        "inline-block",
+                }}
+              >
+                View customer in Shopify ↗
+              </a>
+            )}
           </InlineStack>
         </div>
 
