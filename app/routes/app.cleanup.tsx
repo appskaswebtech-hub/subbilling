@@ -28,15 +28,20 @@ const T = {
 };
 
 // ─── Types ───────────────────────────────────────────────────
-type SellingPlanGroup = { id: string; name: string; createdAt: string };
+type SellingPlanGroup = {
+  id: string;
+  name: string;
+  createdAt: string;
+  /** false = live in Shopify but absent from this app's database. */
+  tracked: boolean;
+};
 type LoaderData = { groups: SellingPlanGroup[]; error?: string };
 type ActionData = { id: string; success: boolean; error?: string };
 
 // ─── Loader ──────────────────────────────────────────────────
-// Selling plan groups this app created for this shop. The Shopify query returns
-// every group on the store, including ones owned by other apps or by the
-// merchant — those must never be listed or deleted from here.
-async function ownedGroupIds(shop: string): Promise<Set<string>> {
+// Groups this app's own database still knows about. NOT an ownership test —
+// see the loader for why the two must not be conflated.
+async function trackedGroupIds(shop: string): Promise<Set<string>> {
   const rows = await prisma.sellingPlanGroup.findMany({
     where:  { shop, shopifyGroupId: { not: null } },
     select: { shopifyGroupId: true },
@@ -46,24 +51,55 @@ async function ownedGroupIds(shop: string): Promise<Set<string>> {
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
+  // appId identifies which app created a group — that is the real ownership
+  // test, and it is what makes listing untracked groups safe.
   const response  = await admin.graphql(`
     query GetAllSellingPlanGroups {
       sellingPlanGroups(first: 50) {
-        edges { node { id name createdAt } }
+        edges { node { id name createdAt appId } }
       }
     }
   `);
-  const data = await response.json() as unknown as { errors?: { message: string }[]; data: { sellingPlanGroups: { edges: { node: SellingPlanGroup }[] } } };
+  type Node = { id: string; name: string; createdAt: string; appId: string | null };
+  const data = await response.json() as unknown as { errors?: { message: string }[]; data: { sellingPlanGroups: { edges: { node: Node }[] } } };
   if (data.errors) {
     return json<LoaderData>({ groups: [], error: data.errors[0]?.message ?? "Failed to fetch" });
   }
 
-  const owned = await ownedGroupIds(session.shop);
-  const groups: SellingPlanGroup[] = data.data.sellingPlanGroups.edges
-    .map(({ node }: { node: SellingPlanGroup }) => ({ id: node.id, name: node.name, createdAt: node.createdAt }))
-    .filter((g) => owned.has(g.id));
+  // Previously this filtered to groups with a local row, which hid exactly the
+  // groups worth cleaning: ones still live in Shopify after their local record
+  // was lost (a reset or swapped database). Those kept selling on the storefront
+  // with no way to remove them from here.
+  //
+  // Ownership is now decided by appId rather than by "do we have a row", so
+  // untracked groups can be listed without ever offering another app's groups
+  // for deletion.
+  const tracked = await trackedGroupIds(session.shop);
 
-  groups.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  // The app's own appId is whichever one its tracked groups carry. With no
+  // tracked groups left there is nothing to compare against, so fall back to
+  // listing only what Shopify lets this app see and let the delete mutation's
+  // userErrors be the guard.
+  const ownAppIds = new Set(
+    data.data.sellingPlanGroups.edges
+      .filter(({ node }) => tracked.has(node.id) && node.appId)
+      .map(({ node }) => node.appId as string),
+  );
+
+  const groups: SellingPlanGroup[] = data.data.sellingPlanGroups.edges
+    .filter(({ node }) => ownAppIds.size === 0 || !node.appId || ownAppIds.has(node.appId))
+    .map(({ node }) => ({
+      id:        node.id,
+      name:      node.name,
+      createdAt: node.createdAt,
+      tracked:   tracked.has(node.id),
+    }));
+
+  // Untracked first: they are the ones the merchant came here to remove.
+  groups.sort((a, b) => {
+    if (a.tracked !== b.tracked) return a.tracked ? 1 : -1;
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
   return json<LoaderData>({ groups });
 }
 
@@ -74,10 +110,19 @@ export async function action({ request }: ActionFunctionArgs) {
   const id        = formData.get("id") as string;
   if (!id) return json<ActionData>({ id: "", success: false, error: "No ID provided" });
 
-  // Re-check ownership server-side — the client can post any GID.
-  const owned = await ownedGroupIds(session.shop);
-  if (!owned.has(id)) {
-    return json<ActionData>({ id, success: false, error: "This selling plan group does not belong to this app." });
+  // Re-check server-side — the client can post any GID. Deliberately NOT
+  // "has a local row": an untracked group is precisely what this page exists to
+  // remove. The guard is that Shopify must return the group to this app, and
+  // sellingPlanGroupDelete itself rejects groups this app did not create,
+  // surfacing as the userErrors handled below.
+  const visible = await admin.graphql(`
+    query GroupExists($id: ID!) {
+      sellingPlanGroup(id: $id) { id }
+    }
+  `, { variables: { id } });
+  const seen = await visible.json();
+  if (!seen?.data?.sellingPlanGroup?.id) {
+    return json<ActionData>({ id, success: false, error: "That selling plan group is not visible to this app." });
   }
 
   try {
@@ -189,6 +234,12 @@ export default function AdminCleanup() {
             </Text>
             <Text as="p" variant="bodySm" tone="subdued">
               Review and clean up duplicate plan groups to keep your app data organized.
+              {groups.some((g) => !g.tracked) && (
+                <>
+                  {" "}Ones marked <strong>Orphaned</strong> are still live in Shopify but missing from
+                  this app's records — they keep appearing on your product pages until deleted here.
+                </>
+              )}
             </Text>
           </div>
           <div style={{ display: "flex", gap: "32px", flexShrink: 0 }}>
@@ -337,6 +388,18 @@ function PlanRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
           <Text as="span" variant="bodyMd" fontWeight="semibold">{group.name}</Text>
+          {!group.tracked && (
+            <span
+              title="Live in Shopify but missing from this app's records — it keeps selling on the storefront and cannot be managed from the Plans page."
+              style={{
+                fontSize: "10px", fontWeight: 700, padding: "2px 8px",
+                borderRadius: "4px", background: "#FAEEDA", color: "#633806",
+                textTransform: "uppercase", letterSpacing: "0.04em",
+              }}
+            >
+              Orphaned
+            </span>
+          )}
           {isOldest && (
             <span style={{
               fontSize: "10px", fontWeight: 700, padding: "2px 8px",

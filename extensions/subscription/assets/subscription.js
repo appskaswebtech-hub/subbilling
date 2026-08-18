@@ -8,18 +8,31 @@
 (function () {
   'use strict';
 
-  // ── Global variant price cache ────────────────────────────────
-  // Populated from window.KAS_PRODUCT_DATA injected by Liquid
-  // Falls back to ShopifyAnalytics
+  // ── Variant data ──────────────────────────────────────────────
+  // Rendered by Liquid into script.sub-product-data, so it is correct on every
+  // theme and does not depend on anything the page happens to expose.
+  //
+  // The fallbacks below are for block instances rendered before that script tag
+  // shipped. ShopifyAnalytics in particular is undocumented and simply absent
+  // when analytics is disabled or a consent app defers it — relying on it meant
+  // variant price updates stopped working with no error at all.
   function getAllVariants() {
-    if (window.KAS_PRODUCT_DATA?.variants) return window.KAS_PRODUCT_DATA.variants;
+    const el = document.querySelector('script.sub-product-data');
+    if (el) {
+      try {
+        const parsed = JSON.parse(el.textContent);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      } catch (e) {
+        console.warn('[KAS] could not parse sub-product-data', e);
+      }
+    }
+
     if (window.ShopifyAnalytics?.meta?.product?.variants) {
       return window.ShopifyAnalytics.meta.product.variants;
     }
-    // Last resort: parse from JSON in page
     try {
-      const el = document.getElementById('product-json') || document.querySelector('[data-product-json]');
-      if (el) return JSON.parse(el.textContent).variants;
+      const legacy = document.getElementById('product-json') || document.querySelector('[data-product-json]');
+      if (legacy) return JSON.parse(legacy.textContent).variants;
     } catch(e) {}
     return [];
   }
@@ -405,7 +418,7 @@
   // window.__subWidget so "is the new code actually live?" is one console line
   // rather than a round of screenshots — the theme asset is CDN-cached and a
   // deploy is easy to believe has landed when it has not.
-  const WIDGET_BUILD = '2026-08-18.theme-chips';
+  const WIDGET_BUILD = '2026-08-18.liquid-sourced-data';
 
   // The payload shape this build needs. A server running older code answers 200
   // with a silently smaller object — indistinguishable from success unless we
@@ -596,15 +609,30 @@
         if (!s.design) {
           console.log('[KAS] no widget design saved — using the theme\'s own styling.');
         }
-        widgets.forEach(function (w) { applySettings(w, s); });
+        // Applied per widget inside its own try/catch. A .catch() on this chain
+        // also swallows anything THROWN here, which previously reported a
+        // rendering bug as "could not reach the app" and sent debugging in
+        // entirely the wrong direction. One broken widget must also not stop
+        // the others from being styled.
+        widgets.forEach(function (w) {
+          try {
+            applySettings(w, s);
+          } catch (err) {
+            console.error(
+              '[KAS] widget settings were fetched successfully but applying them failed — ' +
+              'this is a bug in the widget, NOT a connectivity problem.',
+              err
+            );
+          }
+        });
       })
       .catch(function (err) {
-        // Styling stays an enhancement — the widget remains fully usable on the
-        // theme's own accent colour. But say so rather than failing silently.
+        // Genuine request failure only: anything thrown while applying settings
+        // is caught above and never reaches here.
         report.status = 'unreachable';
         renderDebug(report);
         console.warn(
-          '[KAS] could not reach the app for widget settings at ' + url + ' — ' +
+          '[KAS] the widget settings request failed at ' + url + ' — ' +
           (err && err.message ? err.message : 'network error') +
           '. The widget falls back to the theme\'s styling.'
         );
@@ -961,16 +989,64 @@
     return window.ShopifyAnalytics?.meta?.product?.variants?.[0]?.price || 0;
   }
 
+  // Liquid renders the shop's real format onto the widget root. Preferred over
+  // Shopify.money_format because plenty of themes never define that global.
+  function moneyFormat() {
+    const w = document.querySelector('.sub-widget');
+    if (w && w.dataset.moneyFormat) return w.dataset.moneyFormat;
+    const S = window.Shopify;
+    return (S && (S.money_format || (S.currency && S.currency.money_format))) || '';
+  }
+
+  function shopCurrency() {
+    const w = document.querySelector('.sub-widget');
+    if (w && w.dataset.currency) return w.dataset.currency;
+    const S = window.Shopify;
+    return (S && S.currency && S.currency.active) || '';
+  }
+
   function formatMoney(cents) {
-    if (window.Shopify?.formatMoney) return window.Shopify.formatMoney(cents);
+    const fmt = moneyFormat();
+    if (fmt && window.Shopify && typeof window.Shopify.formatMoney === 'function') {
+      // The format is passed EXPLICITLY. Shopify's helper otherwise falls back
+      // to `this.money_format`, which plenty of themes never set — their code
+      // then calls .match() on undefined and throws. That throw used to abort
+      // refreshFrequencyRow before it reached renderChips, so a theme without a
+      // money_format silently lost its benefit chips as well as its prices.
+      try { return window.Shopify.formatMoney(cents, fmt); } catch (e) { /* fall through */ }
+    }
+
+    // Intl before scraping: it gets the symbol, its position and the decimal
+    // and grouping separators right for the locale. The old fallback hardcoded
+    // a leading symbol and a "." decimal, so a store showing "1.234,50 €" got
+    // "€1234.50" from the widget.
+    const currency = shopCurrency();
+    if (currency && typeof Intl !== 'undefined' && Intl.NumberFormat) {
+      try {
+        return new Intl.NumberFormat(document.documentElement.lang || undefined, {
+          style: 'currency',
+          currency: currency,
+        }).format(cents / 100);
+      } catch (e) { /* unknown currency code — fall through */ }
+    }
+
     return detectCurrencySymbol() + (cents / 100).toFixed(2);
   }
 
+  // Last resort only — reached when Liquid supplied no format and no currency
+  // code, which should not happen on a normally rendered block.
+  //
+  // Matches a symbol at EITHER end: the leading-only regex this used to have
+  // returned nothing for "10,00 €" and fell through to a hardcoded "$", so a
+  // euro store rendered dollar prices.
   function detectCurrencySymbol() {
     const el = document.querySelector('.price-item, [data-product-price], .product__price');
     if (!el) return '$';
-    const match = el.textContent.trim().match(/^[^0-9\s]+/);
-    return match ? match[0] : '$';
+    const text = (el.textContent || '').trim();
+    const lead = text.match(/^[^0-9\s]+/);
+    if (lead) return lead[0];
+    const trail = text.match(/[^0-9\s]+$/);
+    return trail ? trail[0] : '$';
   }
 
   // ── Universal variant-change detection ────────────────────────

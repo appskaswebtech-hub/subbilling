@@ -70,7 +70,18 @@
   but that override goes through the app proxy and is therefore best-effort;
   this is the value that always works.
 {%- endcomment -%}
-<div class="sub-widget" id="sub-widget-{{ block.id }}" data-design="{{ block.settings.design }}" data-theme-chips="{{ theme_chips | strip | escape }}">
+{%- comment -%}
+  Money formatting comes from Liquid rather than being inferred from the page.
+  Scraping a rendered price for its currency symbol breaks on every locale that
+  puts the symbol after the number ("10,00 €"), and silently fell back to "$" —
+  a euro store rendered dollar prices in the widget while the rest of the page
+  was correct. shop.money_format is always right and always available here.
+{%- endcomment -%}
+<div class="sub-widget" id="sub-widget-{{ block.id }}"
+     data-design="{{ block.settings.design }}"
+     data-theme-chips="{{ theme_chips | strip | escape }}"
+     data-money-format="{{ shop.money_format | escape }}"
+     data-currency="{{ cart.currency.iso_code | default: shop.currency | escape }}">
 
   {%- comment -%}
     Per-variant map of the selling plans actually allocated to each variant:
@@ -87,6 +98,19 @@
       }{%- unless forloop.last -%},{%- endunless -%}
     {%- endfor -%}
   }
+  </script>
+
+  {%- comment -%}
+    The product's variants, straight from Liquid.
+
+    The JS previously reached for window.ShopifyAnalytics.meta.product.variants,
+    which is undocumented and absent whenever analytics is disabled or a consent
+    app defers it — variant price updates then stopped working with no error. It
+    also read a window.KAS_PRODUCT_DATA that nothing in this app ever set.
+    Rendering the data here removes both dependencies.
+  {%- endcomment -%}
+  <script type="application/json" class="sub-product-data">
+  {{ product.variants | json }}
   </script>
 
   <p class="sub-widget__label">Purchase Options</p>
