@@ -185,6 +185,11 @@ fieldset[data-type="selling_plan"],
   animation: badge-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
+/* `hidden` must win. The rule above sets display, which otherwise overrides the
+   browser's [hidden] and paints an empty pill — visible under Benefits, which
+   folds the discount into the title and keeps the badge hidden. */
+.sub-option__badge[hidden] { display: none; }
+
 @keyframes badge-pop {
   from { transform: scale(0.7); opacity: 0; }
   to   { transform: scale(1);   opacity: 1; }
@@ -309,6 +314,107 @@ fieldset[data-type="selling_plan"],
 .sub-arctic__select:focus-visible {
   outline: 2px solid var(--sub-accent);
   outline-offset: 1px;
+}
+
+/* Elements only the Benefits design uses. They are always in the collapsed
+   row's markup (one template serves every collapsing design), so they are
+   hidden by default and revealed below — otherwise Arctic would grow a
+   strikethrough price and a chip row it never asked for. */
+.sub-arctic__compare,
+.sub-arctic__chips { display: none; }
+
+/* Benefits — the collapsed row, but with the discount folded into the title,
+   a compare-at price, a full-width frequency picker on its own line, and a row
+   of merchant-defined benefit chips. Same collapse mechanism as Arctic: the
+   per-plan rows stay in the DOM (their radios drive the cart) and are hidden
+   with !important so applyVariantPlans' inline display cannot reveal them. */
+.sub-widget[data-design="benefits"] .sub-option[data-plan-id] {
+  display: none !important;
+}
+.sub-widget[data-design="benefits"] .sub-arctic { display: block; }
+
+/* A grid, not a flex row: the picker and the chips have to span the whole card,
+   and nested in .sub-option__left they could only ever fill the column left over
+   beside the price. Flattening the two presentational wrappers with
+   `display: contents` promotes their children to grid items so the spanning
+   rules below can reach them. */
+.sub-widget[data-design="benefits"] .sub-arctic .sub-option__inner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;   /* dot | title | price */
+  column-gap: 12px;
+  row-gap: 10px;
+  align-items: center;
+}
+.sub-widget[data-design="benefits"] .sub-arctic .sub-option__left,
+.sub-widget[data-design="benefits"] .sub-arctic__body { display: contents; }
+
+/* Placed explicitly rather than left to auto-flow: the price wrapper comes
+   AFTER the picker and chips in the markup, so auto-placement would push it to a
+   fourth row instead of sitting beside the title. */
+.sub-widget[data-design="benefits"] .sub-arctic .sub-option__dot   { grid-row: 1; grid-column: 1; }
+.sub-widget[data-design="benefits"] .sub-arctic .sub-option__title { grid-row: 1; grid-column: 2; }
+.sub-widget[data-design="benefits"] .sub-arctic__price-wrap        { grid-row: 1; grid-column: 3; }
+.sub-widget[data-design="benefits"] .sub-arctic__freq              { grid-row: 2; grid-column: 1 / -1; }
+.sub-widget[data-design="benefits"] .sub-arctic__chips             { grid-row: 3; grid-column: 1 / -1; }
+
+/* Collapse when there is nothing to show, or the row-gap/margin leaves dead
+   space: no chips configured, or a 0%-discount plan with no compare price.
+   `:empty` rather than the `hidden` attribute, because the display rules below
+   would override it — the same trap that made the badge paint. */
+.sub-widget[data-design="benefits"] .sub-arctic__chips:empty,
+.sub-widget[data-design="benefits"] .sub-arctic__compare:empty { display: none; }
+
+.sub-widget[data-design="benefits"] .sub-arctic__compare {
+  display: inline;
+  text-decoration: line-through;
+  color: var(--sub-text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  margin-right: 8px;
+}
+
+/* Full width, and on its own line — the inline 160px Arctic treatment is
+   overridden rather than duplicated. The "Deliver every" prefix goes: each
+   option already reads "Delivery every 10 weeks" in full. */
+.sub-widget[data-design="benefits"] .sub-arctic__freq { display: block; }
+.sub-widget[data-design="benefits"] .sub-arctic__freq-label { display: none; }
+.sub-widget[data-design="benefits"] .sub-arctic__picker { display: block; }
+.sub-widget[data-design="benefits"] .sub-arctic__select {
+  display: block;
+  width: 100%;
+  max-width: none;
+  padding: 10px 34px 10px 12px;
+  font-size: 14px;
+  border: 1.5px solid var(--sub-border);
+  border-radius: var(--sub-radius);
+  background-color: var(--sub-bg);
+  /* Chevron drawn here because appearance:none removes the native one. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1 1.5 6 6.5l5-5' stroke='%236b7280' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.sub-widget[data-design="benefits"] .sub-arctic__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sub-arctic__chip {
+  background: #f3f4f6;
+  color: var(--sub-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: var(--sub-radius-sm);
+}
+
+@media (max-width: 480px) {
+  .sub-widget[data-design="benefits"] .sub-arctic__select { font-size: 13px; }
+  .sub-arctic__chip { font-size: 11px; padding: 5px 8px; }
 }
 
 /* Ribbon — the save badge becomes a corner ribbon instead of sitting inline

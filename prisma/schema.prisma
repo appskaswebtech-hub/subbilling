@@ -37,6 +37,15 @@ model SellingPlanGroup {
   intervalCount   Int
   discount        Float    @default(0)
   discountType    String   @default("percentage")
+
+  // ── Storefront widget ───────────────────────────────────────
+  // Per-plan overrides of the shop-wide AppSettings values. Empty means
+  // "inherit the shop setting". A product shows ONE widget, so when several
+  // plans are attached the newest plan's design wins.
+  widgetDesign       String @default("")
+  // Newline-separated, same format as AppSettings.widgetBenefitChips.
+  widgetBenefitChips String @default("") @db.VarChar(1000)
+
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -102,6 +111,10 @@ model AppSettings {
   widgetBorderRadius    Int      @default(10)
   widgetShowOnetime     Boolean  @default(true)
   widgetDesign          String   @default("arctic")
+  // Newline-separated chip labels for the "benefits" design.
+  // "{discount}" is substituted with the plan's discount when rendered.
+  // Wider than Prisma's default VarChar(191): six chips joined can exceed it.
+  widgetBenefitChips    String   @default("") @db.VarChar(1000)
 
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt

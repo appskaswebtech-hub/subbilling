@@ -26,6 +26,14 @@ import {
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+// Pure module — deliberately free of db.server so the chip editor below can
+// import the same limits and parser the server uses.
+import {
+  MAX_BENEFIT_CHIPS,
+  DEFAULT_BENEFIT_CHIPS,
+  parseBenefitChips,
+  serializeBenefitChips,
+} from "../config/widget-chips";
 import { getFirstSellingPlanId } from "../shopify/sellingPlans.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
@@ -72,6 +80,10 @@ type PlanGroup = {
   discount: number;
   discountType: string;
   createdAt: string;
+  /** "" = inherit the shop-wide widget design. */
+  widgetDesign?: string;
+  /** Newline-separated; parse with parseBenefitChips. */
+  widgetBenefitChips?: string;
   productCount?: number;
   assigned?: AssignedProduct[];
 };
@@ -82,7 +94,20 @@ type PlanFormValues = {
   intervalCount: string;
   discount: string;
   discountType: string;
+  /** "" = inherit the shop-wide widget design. */
+  widgetDesign: string;
+  benefitChips: string[];
 };
+
+// Offered in the plan editor. "" inherits Settings → Widget designs; the rest
+// mirror the theme block's own design list.
+const WIDGET_DESIGN_OPTIONS = [
+  { label: "Use shop default", value: "" },
+  { label: "Default",          value: "default" },
+  { label: "Arctic",           value: "arctic" },
+  { label: "Ribbon",           value: "ribbon" },
+  { label: "Benefits",         value: "benefits" },
+];
 
 type ShopTier = "free" | "basic" | "pro" | "advanced";
 
@@ -216,6 +241,8 @@ function defaultPlanFormValues(): PlanFormValues {
     intervalCount: "1",
     discount: "10",
     discountType: "percentage",
+    widgetDesign: "",
+    benefitChips: DEFAULT_BENEFIT_CHIPS,
   };
 }
 
@@ -534,6 +561,12 @@ export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const intent = formData.get("intent") as string;
 
+  // Widget appearance overrides. Empty design = inherit the shop-wide setting;
+  // chips only mean anything under the "benefits" design but are stored either
+  // way, so switching design back and forth does not lose the merchant's text.
+  const widgetDesign       = ((formData.get("widgetDesign") as string) || "").trim();
+  const widgetBenefitChips = serializeBenefitChips(formData.getAll("benefitChip") as string[]);
+
   // ── Create ─────────────────────────────────────────────────
   if (intent === "create") {
     const shopPlan = await prisma.shopPlan.findUnique({
@@ -645,6 +678,8 @@ export async function action({ request }: ActionFunctionArgs) {
         intervalCount,
         discount,
         discountType,
+        widgetDesign,
+        widgetBenefitChips,
       },
     });
 
@@ -760,7 +795,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     await prisma.sellingPlanGroup.update({
       where: { id },
-      data: { name, interval, intervalCount, discount, discountType },
+      data: { name, interval, intervalCount, discount, discountType, widgetDesign, widgetBenefitChips },
     });
 
     return json({ ok: true, error: null, intent: "update" });
@@ -1088,6 +1123,16 @@ function PlanCard({
             : `${plan.discount}% off`
           : "None",
       special: "discount",
+    },
+    {
+      // Surfaced because a product shows only ONE widget: when several plans
+      // are attached the newest plan's design wins, and without this the
+      // merchant has no way to see which plan is dictating the look.
+      label: "Widget design",
+      value: plan.widgetDesign
+        ? plan.widgetDesign.charAt(0).toUpperCase() + plan.widgetDesign.slice(1)
+        : "Shop default",
+      special: plan.widgetDesign ? null : "muted",
     },
     {
       label: "Shopify GID",
@@ -2203,6 +2248,8 @@ export default function Plans() {
   );
   const [discount, setDiscount] = useState(defaultPlanFormValues().discount);
   const [discountType, setDiscountType] = useState(defaultPlanFormValues().discountType);
+  const [widgetDesign, setWidgetDesign] = useState(defaultPlanFormValues().widgetDesign);
+  const [benefitChips, setBenefitChips] = useState<string[]>(defaultPlanFormValues().benefitChips);
 
   // ── Product picker modal state ──
   const [productPickerOpen, setProductPickerOpen] = useState(false);
@@ -2443,6 +2490,10 @@ export default function Plans() {
     fd.append("intervalCount", intervalCount);
     fd.append("discount", discount || "0");
     fd.append("discountType", discountType);
+    fd.append("widgetDesign", widgetDesign);
+    // Chips are only meaningful under the benefits design, but they are saved
+    // either way so toggling the design does not discard the merchant's text.
+    benefitChips.forEach((c) => fd.append("benefitChip", c));
     submit(fd, { method: "post" });
   }
 
@@ -2455,6 +2506,8 @@ export default function Plans() {
     setIntervalCount(defaults.intervalCount);
     setDiscount(defaults.discount);
     setDiscountType(defaults.discountType);
+    setWidgetDesign(defaults.widgetDesign);
+    setBenefitChips(defaults.benefitChips);
     setEditorOpen(true);
   }
 
@@ -2465,12 +2518,20 @@ export default function Plans() {
     setIntervalCount(plan.intervalCount.toString());
     setDiscount(plan.discount.toString());
     setDiscountType(plan.discountType ?? "percentage");
+    setWidgetDesign(plan.widgetDesign ?? "");
+    // A plan that has never set chips opens on the standard set rather than an
+    // empty editor, matching how the shop-level settings page behaves.
+    const stored = parseBenefitChips(plan.widgetBenefitChips);
+    setBenefitChips(stored.length ? stored : DEFAULT_BENEFIT_CHIPS);
     setEditorOpen(true);
   }
 
   function handleCloseEditor() {
     setEditorOpen(false);
     setEditingPlanId(null);
+    const defaults = defaultPlanFormValues();
+    setWidgetDesign(defaults.widgetDesign);
+    setBenefitChips(defaults.benefitChips);
   }
 
   function handleRemove(
@@ -3031,6 +3092,57 @@ export default function Plans() {
                 suffix={discountType === "percentage" ? "%" : undefined}
                 helpText="Set to 0 for no discount"
               />
+
+              <Select
+                label="Widget design"
+                options={WIDGET_DESIGN_OPTIONS}
+                value={widgetDesign}
+                onChange={setWidgetDesign}
+                helpText="A product shows one widget. When several plans are attached, the newest plan's design is the one used."
+              />
+
+              {widgetDesign === "benefits" && (
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodySm" fontWeight="medium">Benefit chips</Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Shown under the frequency picker while this plan is selected. Use{" "}
+                    <code>{"{discount}"}</code> for the plan's discount — that chip is hidden
+                    automatically when the plan has none.
+                  </Text>
+                  {benefitChips.map((chip, i) => (
+                    <InlineStack key={i} gap="200" blockAlign="center" wrap={false}>
+                      <div style={{ flex: 1 }}>
+                        <TextField
+                          label={`Chip ${i + 1}`}
+                          labelHidden
+                          value={chip}
+                          onChange={(v) => {
+                            const next = [...benefitChips];
+                            next[i] = v;
+                            setBenefitChips(next);
+                          }}
+                          autoComplete="off"
+                          placeholder="e.g. Free shipping on every order"
+                        />
+                      </div>
+                      <Button
+                        onClick={() => setBenefitChips(benefitChips.filter((_, j) => j !== i))}
+                        accessibilityLabel={`Remove chip ${i + 1}`}
+                      >
+                        Remove
+                      </Button>
+                    </InlineStack>
+                  ))}
+                  <div>
+                    <Button
+                      onClick={() => setBenefitChips([...benefitChips, ""])}
+                      disabled={benefitChips.length >= MAX_BENEFIT_CHIPS}
+                    >
+                      Add chip
+                    </Button>
+                  </div>
+                </BlockStack>
+              )}
             </BlockStack>
           </Modal.Section>
         </Modal>

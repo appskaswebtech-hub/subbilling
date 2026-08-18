@@ -9,6 +9,14 @@ import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+// Pure helpers, not the .server module — MAX_BENEFIT_CHIPS is used in the
+// component below and a .server import there would break the client bundle.
+import {
+  DEFAULT_BENEFIT_CHIPS,
+  MAX_BENEFIT_CHIPS,
+  parseBenefitChips,
+  serializeBenefitChips,
+} from "../config/widget-chips";
 import dashboardStyles from "../styles/dashboard.css?url";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -32,9 +40,15 @@ const APP_URL = process.env.SHOPIFY_APP_URL ?? "https://subscription.kaswebtechs
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const [plans, settings] = await Promise.all([
-    prisma.sellingPlanGroup.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "asc" } }),
+    // Newest first, matching the storefront dropdown's order so the preview
+    // does not show plans in the reverse of what the shopper sees.
+    prisma.sellingPlanGroup.findMany({ where: { shop: session.shop }, orderBy: { createdAt: "desc" } }),
     prisma.appSettings.findUnique({ where: { shop: session.shop } }),
   ]);
+  // Empty means unset, so the editor opens on the standard chips rather than an
+  // empty list — matching exactly what the storefront would render today.
+  const storedChips = parseBenefitChips((settings as any)?.widgetBenefitChips);
+
   return json({
     plans,
     appUrl: APP_URL,
@@ -44,6 +58,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       borderRadius:  (settings as any)?.widgetBorderRadius  ?? 10,
       showOnetime:   (settings as any)?.widgetShowOnetime   ?? true,
       design:        (settings as any)?.widgetDesign        ?? "arctic",
+      benefitChips:  storedChips.length ? storedChips : DEFAULT_BENEFIT_CHIPS,
     },
   });
 }
@@ -53,12 +68,15 @@ export async function action({ request }: ActionFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const form = await request.formData();
 
+  // This upsert overwrites every widget column, so each one has to be present
+  // here — a field left out is silently wiped on the next save.
   const data = {
     widgetPrimaryColor:  (form.get("primaryColor")  as string) || "#5B4FCB",
     widgetBadgeColor:    (form.get("badgeColor")    as string) || "#F5A623",
     widgetBorderRadius:  parseInt(form.get("borderRadius") as string, 10) || 10,
     widgetShowOnetime:   form.get("showOnetime") === "true",
     widgetDesign:        (form.get("design") as string) || "arctic",
+    widgetBenefitChips:  serializeBenefitChips(form.getAll("benefitChip") as string[]),
   };
 
   await prisma.appSettings.upsert({
@@ -168,6 +186,49 @@ const DESIGNS = [
       </div>
     ),
   },
+  {
+    key: "benefits",
+    label: "Benefits",
+    desc:  "Full-width frequency picker with benefit chips",
+    preview: (color: string, radius: number) => (
+      <div style={{ border: "1px solid #e5e7eb", borderRadius: "8px", overflow: "hidden", fontSize: "13px" }}>
+        <div style={{ padding: "10px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <div style={{ width: "16px", height: "16px", borderRadius: "50%", border: "2px solid #ccc" }} />
+            <span>One-time purchase</span>
+          </div>
+          <span>$41.00</span>
+        </div>
+        <div style={{ padding: "12px 14px", border: `1.5px solid ${color}`, borderRadius: `${radius}px`, margin: "6px", background: `${color}10` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <div style={{ width: "16px", height: "16px", borderRadius: "50%", border: `2px solid ${color}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: color }} />
+              </div>
+              <span style={{ fontWeight: 600 }}>Subscribe &amp; Save 10%</span>
+            </div>
+            <div>
+              <span style={{ textDecoration: "line-through", color: "#999", marginRight: "6px", fontSize: "11px" }}>$41.00</span>
+              <span style={{ color, fontWeight: 700 }}>$36.90</span>
+            </div>
+          </div>
+          <div style={{
+            marginTop: "8px", padding: "7px 10px", fontSize: "12px",
+            border: "1.5px solid #e5e7eb", borderRadius: `${radius}px`, background: "#fff",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <span>Delivery every 1 month</span>
+            <span style={{ color: "#6b7280", fontSize: "10px" }}>▾</span>
+          </div>
+          <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+            {["10% off each order", "Manage subscriptions easily"].map((c) => (
+              <span key={c} style={{ background: "#f3f4f6", color: "#6b7280", fontSize: "11px", padding: "4px 8px", borderRadius: "6px" }}>{c}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+    ),
+  },
 ];
 
 // ─── Live Widget Preview ──────────────────────────────────────
@@ -181,6 +242,7 @@ function WidgetPreview({
   design,
   samplePrice,
   plans,
+  benefitChips,
 }: {
   primaryColor:   string;
   saveBadgeColor: string;
@@ -191,6 +253,7 @@ function WidgetPreview({
   design:         string;
   samplePrice:    number;
   plans:          Array<{ id: string; name: string; discount: number; interval: string; intervalCount: number }>;
+  benefitChips:   string[];
 }) {
   const [selected,         setSelected]         = useState<"onetime" | "subscribe">("onetime");
   const [selectedPlanIdx,  setSelectedPlanIdx]  = useState(0);
@@ -206,6 +269,8 @@ function WidgetPreview({
     ? samplePrice * (1 - activeDiscount / 100)
     : samplePrice;
 
+  const isBenefits = design === "benefits";
+
   // Extract dropdown label from plan name: "Every 1 Month (10% off)" → "1 Month"
   const getPlanLabel = (plan: typeof planList[0]) => {
     const m = plan.name.match(/Every (.+?)(\s*\(|$)/);
@@ -214,6 +279,18 @@ function WidgetPreview({
     const unit = map[plan.interval] ?? "Month";
     return plan.intervalCount > 1 ? `${plan.intervalCount} ${unit}s` : `1 ${unit}`;
   };
+
+  // Benefits spells the cadence out in the option itself, matching the
+  // storefront's "Delivery every 10 weeks".
+  const getOptionLabel = (plan: typeof planList[0]) =>
+    isBenefits ? `Delivery every ${getPlanLabel(plan).toLowerCase()}` : getPlanLabel(plan);
+
+  // Same rules the storefront applies: {discount} is substituted, and a chip
+  // that uses the token disappears when there is no discount.
+  const resolvedChips = benefitChips
+    .filter((t) => t.trim())
+    .filter((t) => activeDiscount > 0 || !t.includes("{discount}"))
+    .map((t) => t.replace(/\{discount\}/g, String(activeDiscount)).trim());
 
   return (
     <div className="hover-card" style={{
@@ -331,7 +408,9 @@ function WidgetPreview({
                   </div>
                   <div>
                     <span style={{ fontSize: "14px", color: textColor, fontWeight: selected === "subscribe" ? 600 : 400 }}>
-                      Subscribe &amp; save
+                      {isBenefits && activeDiscount > 0
+                        ? `Subscribe & Save ${activeDiscount}%`
+                        : "Subscribe & save"}
                     </span>
                     {/* Arctic only: inline badge. Dropdown puts its badge after
                         the price instead, so the frequency picker leads. */}
@@ -360,27 +439,49 @@ function WidgetPreview({
                 </div>
               </div>
 
-              {/* Deliver every — shown when the subscribe option is selected. */}
+              {/* Frequency picker — shown when the subscribe option is selected.
+                  Benefits gives it the full width of the card and drops the
+                  "Deliver every" prefix, since each option already reads in full. */}
               {selected === "subscribe" && (
                 <div
-                  style={{ marginLeft: "28px", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "#666" }}
+                  style={
+                    isBenefits
+                      ? { padding: "0 14px 12px" }
+                      : { marginLeft: "28px", marginBottom: "12px", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px", color: "#666" }
+                  }
                   onClick={(e) => e.stopPropagation()}
                 >
-                  Deliver every
+                  {!isBenefits && "Deliver every"}
                   <select
                     value={selectedPlanIdx}
                     onChange={(e) => setSelectedPlanIdx(Number(e.target.value))}
                     style={{
-                      fontSize: "13px", fontWeight: 500, padding: "4px 8px",
-                      border: "1px solid #d1d5db", borderRadius: "6px",
+                      fontSize: "13px", fontWeight: 500,
+                      padding: isBenefits ? "8px 10px" : "4px 8px",
+                      width: isBenefits ? "100%" : undefined,
+                      border: `${isBenefits ? 1.5 : 1}px solid #d1d5db`,
+                      borderRadius: `${isBenefits ? borderRadius : 6}px`,
                       background: "#fff", color: textColor, cursor: "pointer",
                       appearance: "auto",
                     }}
                   >
                     {planList.map((p, i) => (
-                      <option key={p.id} value={i}>{getPlanLabel(p)}</option>
+                      <option key={p.id} value={i}>{getOptionLabel(p)}</option>
                     ))}
                   </select>
+
+                  {isBenefits && resolvedChips.length > 0 && (
+                    <div style={{ marginTop: "8px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                      {resolvedChips.map((c, i) => (
+                        <span key={i} style={{
+                          background: "#f3f4f6", color: "#6b7280", fontSize: "11px",
+                          padding: "4px 8px", borderRadius: "6px",
+                        }}>
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -418,6 +519,7 @@ export default function WidgetSettingsPage() {
 
   const [activeTab,   setActiveTab]   = useState<TabKey>("widget");
   const [design,      setDesign]      = useState(saved.design);
+  const [chips,       setChips]       = useState<string[]>(saved.benefitChips);
   const [savedBanner, setSavedBanner] = useState(false);
 
   // Preview-only constants (not editable — controlled by theme block)
@@ -446,6 +548,8 @@ export default function WidgetSettingsPage() {
     fd.append("borderRadius",  String(borderRadius));
     fd.append("showOnetime",   String(showOneTime));
     fd.append("design",        design);
+    // Repeated key — the action reads them back with form.getAll("benefitChip").
+    chips.forEach((c) => fd.append("benefitChip", c));
     submitFn(fd, { method: "post" });
   }
 
@@ -607,6 +711,71 @@ export default function WidgetSettingsPage() {
                     </label>
                   ))}
                 </div>
+
+                {/* Chip editor — only the Benefits design renders chips, so it
+                    only appears once that design is selected. */}
+                {design === "benefits" && (
+                  <div style={{ marginTop: "20px", borderTop: "0.5px solid var(--p-color-border)" }}>
+                    <SettingRow
+                      label="Benefit chips"
+                      hint={`Short selling points shown under the frequency picker. Write {discount} to insert the plan's discount — that chip is hidden automatically when a plan has none. Up to ${MAX_BENEFIT_CHIPS}.`}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {chips.map((chip, i) => (
+                          <div key={i} style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                            <input
+                              type="text"
+                              value={chip}
+                              placeholder="e.g. Free shipping every order"
+                              onChange={(e) => {
+                                const next = [...chips];
+                                next[i] = e.target.value;
+                                setChips(next);
+                              }}
+                              style={{
+                                flex: 1, fontSize: "13px", padding: "8px 10px",
+                                border: "0.5px solid var(--p-color-border-secondary)",
+                                borderRadius: "8px", background: "var(--p-color-bg-surface)",
+                                color: "var(--p-color-text)", outline: "none", boxSizing: "border-box",
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setChips(chips.filter((_, j) => j !== i))}
+                              aria-label={`Remove chip ${i + 1}`}
+                              style={{
+                                border: "0.5px solid var(--p-color-border-secondary)",
+                                background: "var(--p-color-bg-surface)", cursor: "pointer",
+                                borderRadius: "8px", width: "32px", height: "34px",
+                                fontSize: "15px", lineHeight: 1, color: "var(--p-color-text-subdued)",
+                                flexShrink: 0,
+                              }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+
+                        <button
+                          type="button"
+                          onClick={() => setChips([...chips, ""])}
+                          disabled={chips.length >= MAX_BENEFIT_CHIPS}
+                          style={{
+                            alignSelf: "flex-start", marginTop: "4px",
+                            fontSize: "12px", padding: "7px 14px", borderRadius: "8px",
+                            border: "0.5px solid var(--p-color-border-secondary)",
+                            background: "var(--p-color-bg-surface)",
+                            cursor: chips.length >= MAX_BENEFIT_CHIPS ? "not-allowed" : "pointer",
+                            opacity: chips.length >= MAX_BENEFIT_CHIPS ? 0.5 : 1,
+                            fontWeight: 500,
+                          }}
+                        >
+                          + Add chip
+                        </button>
+                      </div>
+                    </SettingRow>
+                  </div>
+                )}
               </div>
             )}
 
@@ -661,6 +830,7 @@ export default function WidgetSettingsPage() {
               design={design}
               samplePrice={samplePrice}
               plans={plans}
+              benefitChips={chips}
             />
           </div>
         </div>

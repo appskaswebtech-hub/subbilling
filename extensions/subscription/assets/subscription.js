@@ -114,9 +114,10 @@
     // No subscription for this variant → hide the entire widget.
     widget.style.display = anyVisible ? '' : 'none';
 
-    // Arctic collapses the plan rows into one dropdown, so its options have to
-    // be rebuilt whenever variant availability changes.
-    refreshFrequencyRow(widget);
+    // Collapsing designs rebuild their dropdown whenever variant availability
+    // changes — and via applyDesign, because a variant change can change which
+    // plan is newest and therefore which plan's design wins.
+    applyDesign(widget);
   }
 
   // ─── Arctic design ──────────────────────────────────────────
@@ -128,11 +129,51 @@
   // dropdown only *selects* one of them. Replacing them would mean
   // reimplementing variant filtering, price sync and cart wiring.
 
+  // ─── Per-plan overrides ─────────────────────────────────────
+  // Each plan may carry its own design and chips, delivered as a map keyed by
+  // selling plan group id. A product renders ONE widget, so when several plans
+  // are attached the NEWEST plan wins — the same plan the dropdown defaults to.
+
+  function planWidgetMap(widget) {
+    try {
+      return JSON.parse(widget.dataset.planWidgets || '{}') || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // The app stores full GIDs while Liquid emits bare numeric ids. Normalising
+  // both sides means a mismatch cannot silently resolve to "no override".
+  function bareId(value) {
+    const raw = String(value == null ? '' : value);
+    return (raw.split('/').pop() || raw).trim();
+  }
+
+  function planOverride(widget, card) {
+    if (!card) return null;
+    return planWidgetMap(widget)[bareId(card.dataset.groupId)] || null;
+  }
+
+  // Design for the newest plan available on the current variant, falling back to
+  // the shop-wide setting and finally to whatever Liquid rendered.
+  function resolvePlanDesign(widget) {
+    const newest = availablePlanCards(widget)[0];
+    const own    = planOverride(widget, newest);
+    if (own && own.design) return own.design;
+    return widget.dataset.shopDesign || widget.dataset.design || '';
+  }
+
   function availablePlanCards(widget) {
     // applyVariantPlans sets inline display:none on plans the current variant
     // cannot use, so that is the source of truth for what to offer.
+    //
+    // Newest first: Shopify's numeric resource ids increase over time, so the
+    // larger id is the more recently created selling plan. Sorting here rather
+    // than in Liquid keeps it correct across all the groups a product may have,
+    // whose relative order the theme does not control.
     return Array.from(widget.querySelectorAll('.sub-option[data-plan-id]'))
-      .filter((card) => card.style.display !== 'none');
+      .filter((card) => card.style.display !== 'none')
+      .sort((a, b) => (parseInt(b.dataset.planId, 10) || 0) - (parseInt(a.dataset.planId, 10) || 0));
   }
 
   function buildFrequencyRow(widget) {
@@ -140,6 +181,9 @@
 
     const row = document.createElement('label');
     row.className = 'sub-option sub-arctic';
+    // One template serves every collapsing design. The compare price and the
+    // chip row are inert under Arctic — CSS hides them unless the design is
+    // `benefits` — so the shared refresh logic below stays single-branch.
     row.innerHTML =
       '<span class="sub-option__inner">' +
         '<span class="sub-option__left">' +
@@ -149,12 +193,19 @@
               '<span class="sub-arctic__label">Subscribe &amp; save</span>' +
               '<span class="sub-option__badge sub-arctic__badge" hidden></span>' +
             '</span>' +
-            '<span class="sub-arctic__freq">Deliver every ' +
-              '<select class="sub-arctic__select" aria-label="Delivery frequency"></select>' +
+            '<span class="sub-arctic__freq">' +
+              '<span class="sub-arctic__freq-label">Deliver every </span>' +
+              '<span class="sub-arctic__picker">' +
+                '<select class="sub-arctic__select" aria-label="Delivery frequency"></select>' +
+              '</span>' +
             '</span>' +
+            '<span class="sub-arctic__chips"></span>' +
           '</span>' +
         '</span>' +
-        '<span class="sub-option__price sub-arctic__price"></span>' +
+        '<span class="sub-option__price sub-arctic__price-wrap">' +
+          '<span class="sub-arctic__compare"></span>' +
+          '<span class="sub-arctic__price"></span>' +
+        '</span>' +
       '</span>';
 
     const options = widget.querySelector('.sub-widget__options');
@@ -195,12 +246,16 @@
     row.style.display = cards.length ? '' : 'none';
     if (!cards.length) return;
 
+    const isBenefits = widget.dataset.design === 'benefits';
+
     const checked  = widget.querySelector('.sub-option__radio:checked');
     const checkedId = checked && checked.value ? String(checked.value) : '';
 
     // Rebuild options only when the available set actually changed, so the
     // merchant's current choice is not reset on every 400ms variant poll.
-    const signature = cards.map((c) => c.dataset.planId).join(',');
+    // The design is part of the signature because the two designs label their
+    // options differently and the design can change after the settings fetch.
+    const signature = cards.map((c) => c.dataset.planId).join(',') + '|' + (isBenefits ? 'b' : 'a');
     if (select.dataset.signature !== signature) {
       select.dataset.signature = signature;
       select.innerHTML = '';
@@ -211,9 +266,19 @@
         // Strip the badge text so the option reads "Monthly Subscription",
         // not "Monthly Subscription SAVE 20%".
         const badge = title && title.querySelector('.sub-option__badge');
-        opt.textContent = title
+        const planTitle = title
           ? title.textContent.replace(badge ? badge.textContent : '', '').trim()
           : card.dataset.planId;
+
+        // Benefits spells the cadence out in full: the plan carries its own
+        // interval label ("Every 10 Weeks"), which reads as "Delivery every 10
+        // weeks" — independent of whatever the merchant named the plan.
+        if (isBenefits) {
+          const interval = card.dataset.planOption || planTitle;
+          opt.textContent = 'Delivery ' + String(interval).toLowerCase();
+        } else {
+          opt.textContent = planTitle;
+        }
         select.appendChild(opt);
       });
     }
@@ -232,8 +297,18 @@
 
     const badgeEl  = row.querySelector('.sub-arctic__badge');
     const discount = parseFloat(shownCard.dataset.discount);
+    const hasDiscount = discount > 0;
+
+    // Benefits folds the discount into the title instead of showing a separate
+    // pill, so the badge stays hidden there.
+    const labelEl = row.querySelector('.sub-arctic__label');
+    if (labelEl) {
+      labelEl.textContent = (isBenefits && hasDiscount)
+        ? 'Subscribe & Save ' + discount + '%'
+        : 'Subscribe & save';
+    }
     if (badgeEl) {
-      if (discount > 0) {
+      if (hasDiscount && !isBenefits) {
         badgeEl.textContent = 'SAVE ' + discount + '%';
         badgeEl.hidden = false;
       } else {
@@ -241,7 +316,80 @@
       }
     }
 
+    // Compare-at price. Only meaningful when the plan actually costs less than
+    // the one-time price — a 0% plan must not show "$40.00 $40.00".
+    const compareEl = row.querySelector('.sub-arctic__compare');
+    if (compareEl) {
+      const base = getBasePrice();
+      compareEl.textContent = (hasDiscount && !isNaN(price) && base > price)
+        ? formatMoney(base)
+        : '';
+    }
+
+    renderChips(widget, row, discount, shownCard);
+
     row.classList.toggle('sub-option--active', isPlanChecked);
+  }
+
+  // Merchant-defined benefit chips, configured in the app admin and delivered
+  // with the rest of the widget settings.
+  //
+  // Resolved per plan: the chips belong to whichever plan the dropdown is
+  // currently showing, so they change as the shopper changes frequency. A plan
+  // that defines none inherits the shop-wide set.
+  //
+  // `{discount}` is substituted with the active plan's discount; a chip that
+  // uses the token is dropped entirely when there is no discount, so no
+  // storefront ever renders "0% off each order".
+  // Tolerant of anything: an unset attribute, malformed JSON from a hand-edited
+  // theme setting, or a non-array. Chips are decoration — a bad value must
+  // never take the widget down with it.
+  function readChips(raw) {
+    try {
+      const parsed = JSON.parse(raw || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function renderChips(widget, row, discount, shownCard) {
+    const wrap = row.querySelector('.sub-arctic__chips');
+    if (!wrap) return;
+
+    // Resolution order, most specific first. The theme value is the base layer
+    // because it is rendered inline by Liquid and therefore always present —
+    // the app layers above it are best-effort, and a chip row that depended on
+    // them alone stayed empty whenever the proxy was unreachable or the app was
+    // running an older payload.
+    let chips = readChips(widget.dataset.themeChips);
+
+    const shopChips = readChips(widget.dataset.benefitChips);
+    if (shopChips.length) chips = shopChips;
+
+    const own = planOverride(widget, shownCard);
+    if (own && Array.isArray(own.chips) && own.chips.length) chips = own.chips;
+
+    const hasDiscount = discount > 0;
+    const resolved = chips
+      .filter((text) => typeof text === 'string' && text.trim())
+      .filter((text) => hasDiscount || text.indexOf('{discount}') === -1)
+      .map((text) => text.replace(/\{discount\}/g, discount).trim());
+
+    // Signature guard for the same reason the options have one: this runs on
+    // every variant poll and rebuilding the nodes each time would fight with
+    // text selection and CSS transitions.
+    const signature = resolved.join('\u0000');
+    if (wrap.dataset.signature === signature) return;
+    wrap.dataset.signature = signature;
+
+    wrap.innerHTML = '';
+    resolved.forEach((text) => {
+      const chip = document.createElement('span');
+      chip.className   = 'sub-arctic__chip';
+      chip.textContent = text;   // textContent, never innerHTML — merchant input
+      wrap.appendChild(chip);
+    });
   }
 
   // ─── Admin widget settings ──────────────────────────────────
@@ -257,7 +405,12 @@
   // window.__subWidget so "is the new code actually live?" is one console line
   // rather than a round of screenshots — the theme asset is CDN-cached and a
   // deploy is easy to believe has landed when it has not.
-  const WIDGET_BUILD = '2026-08-07.no-dropdown';
+  const WIDGET_BUILD = '2026-08-18.theme-chips';
+
+  // The payload shape this build needs. A server running older code answers 200
+  // with a silently smaller object — indistinguishable from success unless we
+  // check. Keep in step with WIDGET_PAYLOAD_VERSION in widget-settings.server.ts.
+  const EXPECTED_PAYLOAD_VERSION = 2;
 
   // One storefront path — the proxy REPLACES `/apps/subscriptions` with the
   // configured proxy URL and appends the rest, so this same request lands on
@@ -295,15 +448,28 @@
       if (onetime) onetime.style.display = 'none';
     }
 
-    // Layout variant. CSS keys off this for `default` and `ribbon`; `arctic`
-    // additionally needs the dropdown row built.
-    // Overrides whatever Liquid rendered. When the app is unreachable the
-    // markup's design simply stands, which is why colours have always worked
-    // while the design did not — colours had no such fallback to lose.
-    if (s.design) {
-      widget.dataset.design = s.design;
-      applyDesign(widget);
+    // Benefit chips for the `benefits` design. Stashed before applyDesign so
+    // the first render already has them and there is no second reflow.
+    if (Array.isArray(s.benefitChips)) {
+      widget.dataset.benefitChips = JSON.stringify(s.benefitChips);
     }
+
+    // Per-plan design/chip overrides, keyed by selling plan group id. Must be
+    // set before applyDesign, which resolves the winning design from this map.
+    if (s.planWidgets && typeof s.planWidgets === 'object') {
+      widget.dataset.planWidgets = JSON.stringify(s.planWidgets);
+    }
+
+    // Layout variant. CSS keys off this for `default` and `ribbon`; `arctic`
+    // and `benefits` additionally need the dropdown row built.
+    //
+    // The shop-wide value is kept separately as the fallback resolvePlanDesign
+    // uses when the newest plan sets no design of its own. Overrides whatever
+    // Liquid rendered; when the app is unreachable the markup's design stands,
+    // which is why colours have always worked while the design did not —
+    // colours had no such fallback to lose.
+    if (s.design) widget.dataset.shopDesign = s.design;
+    applyDesign(widget);
 
     // Keep the Arctic row's selected state in step when the shopper picks
     // one-time (or any plan) through the original controls.
@@ -334,14 +500,35 @@
     }
 
     const w = document.querySelector('.sub-widget');
+
+    // Which plan is dictating the design, and what overrides arrived. Without
+    // this, "newest plan wins" is invisible and unfalsifiable from a screenshot.
+    let newestLine = '(no widget)';
+    let overrideLine = '(none)';
+    if (w) {
+      const newest = availablePlanCards(w)[0];
+      newestLine = newest
+        ? 'plan ' + newest.dataset.planId + ' / group ' + bareId(newest.dataset.groupId)
+        : '(no plans for this variant)';
+      const keys = Object.keys(planWidgetMap(w));
+      overrideLine = keys.length ? keys.join(', ') : '(none)';
+    }
+
     box.textContent =
       'SUBSCRIPTION WIDGET DEBUG\n' +
       'build          : ' + report.build + '\n' +
       'settings url   : ' + report.url + '\n' +
       'settings status: ' + (report.status === null ? 'pending…' : report.status) + '\n' +
+      'payload        : ' + (report.payload
+        ? 'v' + report.payload + (report.payload < EXPECTED_PAYLOAD_VERSION
+            ? ' ⚠ STALE SERVER (need v' + EXPECTED_PAYLOAD_VERSION + ')'
+            : ' ok')
+        : '(none yet)') + '\n' +
       'design (theme) : ' + (report.designFromTheme || '(none)') + '\n' +
-      'design (app)   : ' + (report.design || '(none)') + '\n' +
+      'design (shop)  : ' + (report.design || '(none)') + '\n' +
       'design applied : ' + (w ? (w.dataset.design || '(none)') + '' : '(no widget)') + '\n' +
+      'newest plan    : ' + newestLine + '\n' +
+      'plan overrides : ' + overrideLine + '\n' +
       'frequency row  : ' + (document.querySelector('.sub-arctic') ? 'built' : 'not built');
   }
 
@@ -359,6 +546,7 @@
       build:        WIDGET_BUILD,
       url:          url,
       status:       null,
+      payload:      null,
       settings:     null,
       design:       null,
       designFromTheme: widgets[0] ? widgets[0].dataset.design || null : null,
@@ -390,7 +578,21 @@
         }
         report.settings = s;
         report.design   = s.design;
+        report.payload  = s.apiVersion || 1;
         renderDebug(report);
+
+        // A 200 carrying an older shape is the failure mode that looks exactly
+        // like success: fields simply absent, no error anywhere. Name it.
+        if (report.payload < EXPECTED_PAYLOAD_VERSION) {
+          console.warn(
+            '[KAS] the app answered with payload v' + report.payload + ' but this widget build ' +
+            'expects v' + EXPECTED_PAYLOAD_VERSION + ' — the server at this app proxy is running ' +
+            'OLDER code than the theme extension. Benefit chips and per-plan designs will be ' +
+            'missing until it is redeployed (and its database migrated). Falling back to the ' +
+            'theme block\'s own settings.'
+          );
+        }
+
         if (!s.design) {
           console.log('[KAS] no widget design saved — using the theme\'s own styling.');
         }
@@ -410,10 +612,21 @@
   }
 
   // Designs whose plan rows collapse into a single row with a frequency picker.
-  const COLLAPSING_DESIGNS = ['arctic'];
+  const COLLAPSING_DESIGNS = ['arctic', 'benefits'];
 
   function applyDesign(widget) {
-    if (COLLAPSING_DESIGNS.indexOf(widget.dataset.design) === -1) return;
+    // Resolve first: which plan is newest can change with the variant, so the
+    // design is re-derived here rather than assumed fixed for the page.
+    const design = resolvePlanDesign(widget);
+    if (design) widget.dataset.design = design;
+
+    if (COLLAPSING_DESIGNS.indexOf(widget.dataset.design) === -1) {
+      // Non-collapsing design: the per-plan rows are the UI. Hide the collapsed
+      // row if an earlier resolution built one, or it would show alongside them.
+      const row = widget.querySelector('.sub-arctic');
+      if (row) row.style.display = 'none';
+      return;
+    }
     buildFrequencyRow(widget);   // idempotent — returns early if already built
     refreshFrequencyRow(widget);
   }

@@ -38,12 +38,39 @@
 </style>
 
 {%- comment -%}
+  Benefit chips, rendered here for the same reason as data-design below: this is
+  the value that always works. The app can refine them per shop and per plan,
+  but that arrives over the app proxy and is best-effort, so a chip row that
+  depended on it alone stayed empty whenever the proxy was unreachable or the
+  app was running older code.
+
+  json-encoded per value rather than hand-quoted: chip text is merchant free
+  text and would otherwise break the attribute on an apostrophe.
+{%- endcomment -%}
+{%- assign chip_list = block.settings.benefit_1
+  | append: '||' | append: block.settings.benefit_2
+  | append: '||' | append: block.settings.benefit_3
+  | split: '||' -%}
+{%- capture theme_chips -%}
+  {%- assign chip_sep = '' -%}
+  [
+  {%- for chip in chip_list -%}
+    {%- assign trimmed = chip | strip -%}
+    {%- if trimmed != blank -%}
+      {{- chip_sep }}{{ trimmed | json -}}
+      {%- assign chip_sep = ',' -%}
+    {%- endif -%}
+  {%- endfor -%}
+  ]
+{%- endcapture -%}
+
+{%- comment -%}
   data-design is rendered here rather than fetched, so the layout is correct on
   first paint. The app admin (Settings → Widget designs) can still override it,
   but that override goes through the app proxy and is therefore best-effort;
   this is the value that always works.
 {%- endcomment -%}
-<div class="sub-widget" id="sub-widget-{{ block.id }}" data-design="{{ block.settings.design }}">
+<div class="sub-widget" id="sub-widget-{{ block.id }}" data-design="{{ block.settings.design }}" data-theme-chips="{{ theme_chips | strip | escape }}">
 
   {%- comment -%}
     Per-variant map of the selling plans actually allocated to each variant:
@@ -108,12 +135,19 @@
           {%- endif -%}
         {%- endfor -%}
 
+        {%- comment -%}
+          The interval label as the plan was created with it — "Every 10 Weeks".
+          The benefits design lowercases it into "Delivery every 10 weeks" for its
+          dropdown, so that reading never depends on how the merchant named the plan.
+        {%- endcomment -%}
         <label
           class="sub-option"
           for="sub-plan-{{ plan.id }}-{{ block.id }}"
           data-plan-id="{{ plan.id }}"
           data-plan-price="{{ final_price }}"
           data-discount="{{ discount_pct }}"
+          data-plan-option="{{ plan.options.first.value | default: plan.name }}"
+          data-group-id="{{ group.id }}"
         >
           <input
             class="sub-option__radio"
@@ -168,7 +202,8 @@
       "options": [
         { "value": "default",  "label": "Default — standard option list" },
         { "value": "arctic",   "label": "Arctic — save badge inline, frequency picker" },
-        { "value": "ribbon",   "label": "Ribbon — save badge on a corner ribbon" }
+        { "value": "ribbon",   "label": "Ribbon — save badge on a corner ribbon" },
+        { "value": "benefits", "label": "Benefits — full-width picker with benefit chips" }
       ],
       "default": "arctic"
     },
@@ -185,10 +220,33 @@
       "default": true
     },
     {
+      "type": "header",
+      "content": "Benefit chips",
+      "info": "Shown by the Benefits design under the frequency picker. Use {discount} for the plan's discount — that chip is hidden automatically when a plan has none. The app can override these per shop and per plan; leave a field blank to drop that chip."
+    },
+    {
+      "type": "text",
+      "id": "benefit_1",
+      "label": "Benefit chip 1",
+      "default": "{discount}% off each order"
+    },
+    {
+      "type": "text",
+      "id": "benefit_2",
+      "label": "Benefit chip 2",
+      "default": "Manage subscriptions easily"
+    },
+    {
+      "type": "text",
+      "id": "benefit_3",
+      "label": "Benefit chip 3",
+      "default": "Earn loyalty points"
+    },
+    {
       "type": "textarea",
       "id": "custom_css",
       "label": "Custom CSS",
-      "info": "Write full CSS rules. Useful selectors: .sub-widget, .sub-option, .sub-option--active, .sub-option__title, .sub-option__price, .sub-option__badge, .sub-widget__savings"
+      "info": "Write full CSS rules. Useful selectors: .sub-widget, .sub-option, .sub-option--active, .sub-option__title, .sub-option__price, .sub-option__badge, .sub-widget__savings. Benefits design: .sub-arctic__picker, .sub-arctic__select, .sub-arctic__compare, .sub-arctic__chips, .sub-arctic__chip"
     }
   ]
 }
