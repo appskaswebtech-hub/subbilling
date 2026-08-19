@@ -19,7 +19,7 @@ export const PLANS: Record<string, Plan> = {
     color:     "#f6f6f7",
     popular:   false,
     features: [
-      "Limited Subscription Plans",
+      "Up to 5 Subscription Plans",
       "Weekly, Monthly and Yearly Billing",
       "Email Support",
       "Up to 50 Subscription Products",
@@ -28,12 +28,12 @@ export const PLANS: Record<string, Plan> = {
   pro: {
     key:       "pro",
     label:     "Pro",
-    price:     30,
+    price:     14.99,
     trialDays: 7,
     color:     "#f0f4ff",
     popular:   true,
     features: [
-      "Unlimited Subscription Plans",
+      "Up to 10 Subscription Plans",
       "Up to 500 Subscription Products",
       "Weekly, Monthly and Yearly Billing",
       "Priority Support",
@@ -42,7 +42,7 @@ export const PLANS: Record<string, Plan> = {
   advanced: {
     key:       "advanced",
     label:     "Advanced",
-    price:     40,
+    price:     19.99,
     trialDays: 7,
     color:     "#f3f0ff",
     popular:   false,

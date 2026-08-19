@@ -115,8 +115,8 @@ type ShopTier = "free" | "basic" | "pro" | "advanced";
 // NOTE: -1 means unlimited. We avoid Infinity because JSON.stringify(Infinity) === "null"
 const PLAN_LIMITS: Record<ShopTier, number> = {
   free: 1,
-  basic: 3,
-  pro: 5,
+  basic: 5,
+  pro: 10,
   advanced: -1, // -1 = unlimited
 };
 
@@ -2225,7 +2225,7 @@ function HelpSidebar() {
 
 // ─── Page component ───────────────────────────────────────────
 export default function Plans() {
-  const { planGroups, planLimit, planLabel, allProducts, stats } =
+  const { planGroups, planLimit, planLabel, shopTier, allProducts, stats } =
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
@@ -2237,6 +2237,9 @@ export default function Plans() {
 
   const unlimited = isUnlimitedLimit(planLimit);
   const atLimit = !unlimited && planGroups.length >= planLimit;
+  // Advanced is the only unlimited tier, so a Pro merchant at the cap has
+  // exactly one place to go.
+  const upgradeTarget = shopTier === "pro" ? "Advanced" : "Pro or Advanced";
 
   // ── Plan editor modal state ──
   const [editorOpen, setEditorOpen] = useState(false);
@@ -2665,7 +2668,7 @@ export default function Plans() {
                   <span style={{ color: "#A32D2D" }}>
                     Your <strong>{planLabel}</strong> plan allows up to{" "}
                     <strong>{planLimit}</strong> selling plan
-                    {planLimit === 1 ? "" : "s"}. Upgrade to Pro or Advanced to
+                    {planLimit === 1 ? "" : "s"}. Upgrade to {upgradeTarget} to
                     unlock more.
                   </span>
                 </Text>

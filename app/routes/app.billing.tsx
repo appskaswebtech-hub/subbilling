@@ -145,7 +145,7 @@ const PLAN_ICONS: Record<string, { icon: string; bg: string; fg: string }> = {
 
 // ─── Feature comparison matrix (basic / pro / advanced) ───────
 const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
-  { label: "Subscription plans",    values: { basic: "Limited",   pro: "Unlimited", advanced: "Unlimited" } },
+  { label: "Subscription plans",    values: { basic: "Up to 5",   pro: "Up to 10",  advanced: "Unlimited" } },
   { label: "Subscription products", values: { basic: "Up to 50",  pro: "Up to 500", advanced: "Unlimited" } },
   { label: "Billing intervals",     values: { basic: "Weekly, Monthly, Yearly", pro: "Weekly, Monthly, Yearly", advanced: "Weekly, Monthly, Yearly" } },
   { label: "Support",               values: { basic: "Email",     pro: "Priority",  advanced: "Priority"  } },

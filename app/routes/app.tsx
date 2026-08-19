@@ -41,7 +41,7 @@ function PlanGatePopup() {
       popular: false,
       features: [
         "Up to 50 Subscription Products",
-        "Limited Subscription Plans",
+        "Up to 5 Subscription Plans",
         "Weekly, Monthly & Yearly Billing",
         "Email Support",
       ],
@@ -49,12 +49,12 @@ function PlanGatePopup() {
     {
       key:     "pro",
       label:   "Pro",
-      price:   30,
+      price:   14.99,
       color:   "#f0f4ff",
       popular: true,
       features: [
         "Up to 500 Subscription Products",
-        "Unlimited Subscription Plans",
+        "Up to 10 Subscription Plans",
         "Weekly, Monthly & Yearly Billing",
         "Priority Support",
       ],
@@ -62,7 +62,7 @@ function PlanGatePopup() {
     {
       key:     "advanced",
       label:   "Advanced",
-      price:   40,
+      price:   19.99,
       color:   "#f3f0ff",
       popular: false,
       features: [
