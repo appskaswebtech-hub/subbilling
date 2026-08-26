@@ -1114,9 +1114,19 @@ export async function action({ request }: ActionFunctionArgs) {
         const result     = await res.json();
         const userErrors = result?.data?.sellingPlanGroupDelete?.userErrors ?? [];
         if (userErrors.length > 0) {
+          const message = userErrors.map((e: { message: string }) => e.message).join(", ");
+          // "Selling plan group does not exist" is Shopify's answer both when the
+          // group is genuinely gone AND when it belongs to a different app —
+          // selling plan WRITES are scoped to the app that created the group.
+          // Either way this app will never delete it, so the row above would stay
+          // listed and fail forever. Flag it so the merchant can drop the local
+          // record instead; see the `forget` intent for why that is a separate,
+          // explicit step rather than something done here.
+          const unmanageable = /does not exist/i.test(message);
           return json({
             ok: false,
-            error: `Delete on Shopify failed: ${userErrors.map((e: { message: string }) => e.message).join(", ")}`,
+            error: `Delete on Shopify failed: ${message}`,
+            ...(unmanageable ? { orphaned: true, orphanId: id } : {}),
           });
         }
       } catch (err: any) {
@@ -1128,6 +1138,19 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     await prisma.sellingPlanGroup.delete({ where: { id } });
     return json({ ok: true, error: null, intent: "delete" });
+  }
+
+  // ── Forget (drops this app's record only) ──────────────────
+  // Reachable only after a delete has already come back "does not exist". It is
+  // deliberately NOT folded into `delete`: doing this automatically on any
+  // failure would erase a real plan the moment Shopify had a transient wobble,
+  // and the group would go on selling with nothing in the admin able to see it.
+  // Shopify is left untouched here — this only stops the app advertising a plan
+  // it cannot manage.
+  if (intent === "forget") {
+    const id = formData.get("id") as string;
+    await prisma.sellingPlanGroup.deleteMany({ where: { id, shop: session.shop } });
+    return json({ ok: true, error: null, intent: "forget" });
   }
 
   return json({ ok: false, error: `Unknown intent: ${intent}` });
@@ -2493,6 +2516,29 @@ export default function Plans() {
       setToastIsError(true);
       setToastActive(true);
       setIsAssigning(false);
+
+      // Shopify refused this delete permanently — the group belongs to a
+      // different app, so retrying can never work. Offer the only remaining exit
+      // rather than leaving a row that fails every time it is touched. Asked
+      // rather than done, because the group stays live on the storefront and the
+      // merchant should know they are hiding it from the app, not removing it.
+      const orphanId = (actionData as any).orphaned
+        ? ((actionData as any).orphanId as string)
+        : null;
+      if (orphanId) {
+        const forget = confirm(
+          "This plan was created by a different app, so Shopify will not let this " +
+            "app delete it.\n\nRemove it from this app's list anyway?\n\n" +
+            "The plan stays live in Shopify and keeps selling — this only stops " +
+            "it being listed here.",
+        );
+        if (forget) {
+          const fd = new FormData();
+          fd.append("intent", "forget");
+          fd.append("id", orphanId);
+          submit(fd, { method: "post" });
+        }
+      }
     } else if (actionData.ok) {
       const msgs: Record<string, string> = {
         create: "Selling plan created!",
@@ -2501,6 +2547,7 @@ export default function Plans() {
         remove_product: "Product removed from plan.",
         remove_variant: "Variant removed from plan.",
         delete: "Plan deleted.",
+        forget: "Removed from this app's list. The plan is still live in Shopify.",
       };
       setToastMsg(msgs[(actionData as any).intent] ?? "Done!");
       setToastIsError(false);
@@ -3304,52 +3351,65 @@ export default function Plans() {
                 helpText="Applied while this plan is the one the shopper has selected. Several plans can share a product, each with its own design."
               />
 
-              <BlockStack gap="200">
-                <Text as="p" variant="bodySm" fontWeight="medium">
-                  Colours for this plan
-                </Text>
-                <Text as="p" variant="bodySm" tone="subdued">
-                  Leave a field empty to use the shop-wide setting from Settings →
-                  Widget. Clearing a field again returns that plan to the shop value.
-                </Text>
+              {/*
+                Edit only. These are OVERRIDES of the shop-wide widget colours —
+                a refinement for a plan that already exists, not a decision worth
+                making while first naming one, so they only clutter the create
+                form.
 
-                <InlineStack gap="200" blockAlign="end" wrap={false}>
-                  <ColorSwatch value={widgetPrimaryColor} onChange={setWidgetPrimaryColor} />
-                  <div style={{ flex: 1 }}>
-                    <TextField
-                      label="Primary colour"
-                      value={widgetPrimaryColor}
-                      onChange={setWidgetPrimaryColor}
-                      placeholder="Inherit"
-                      autoComplete="off"
-                    />
-                  </div>
-                </InlineStack>
+                Hiding them cannot change what gets saved: handleOpenCreate resets
+                all three to "" before the modal opens, and handleCreate builds its
+                FormData from state rather than the DOM, so they still post ""
+                ("inherit") exactly as they do today.
+              */}
+              {editingPlanId && (
+                <BlockStack gap="200">
+                  <Text as="p" variant="bodySm" fontWeight="medium">
+                    Colours for this plan
+                  </Text>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    Leave a field empty to use the shop-wide setting from Settings →
+                    Widget. Clearing a field again returns that plan to the shop value.
+                  </Text>
 
-                <InlineStack gap="200" blockAlign="end" wrap={false}>
-                  <ColorSwatch value={widgetBadgeColor} onChange={setWidgetBadgeColor} />
-                  <div style={{ flex: 1 }}>
-                    <TextField
-                      label="Badge colour"
-                      value={widgetBadgeColor}
-                      onChange={setWidgetBadgeColor}
-                      placeholder="Inherit"
-                      autoComplete="off"
-                    />
-                  </div>
-                </InlineStack>
+                  <InlineStack gap="200" blockAlign="end" wrap={false}>
+                    <ColorSwatch value={widgetPrimaryColor} onChange={setWidgetPrimaryColor} />
+                    <div style={{ flex: 1 }}>
+                      <TextField
+                        label="Primary colour"
+                        value={widgetPrimaryColor}
+                        onChange={setWidgetPrimaryColor}
+                        placeholder="Inherit"
+                        autoComplete="off"
+                      />
+                    </div>
+                  </InlineStack>
 
-                <TextField
-                  label="Corner radius"
-                  value={widgetBorderRadius}
-                  onChange={setWidgetBorderRadius}
-                  type="number"
-                  min={0}
-                  suffix="px"
-                  placeholder="Inherit"
-                  autoComplete="off"
-                />
-              </BlockStack>
+                  <InlineStack gap="200" blockAlign="end" wrap={false}>
+                    <ColorSwatch value={widgetBadgeColor} onChange={setWidgetBadgeColor} />
+                    <div style={{ flex: 1 }}>
+                      <TextField
+                        label="Badge colour"
+                        value={widgetBadgeColor}
+                        onChange={setWidgetBadgeColor}
+                        placeholder="Inherit"
+                        autoComplete="off"
+                      />
+                    </div>
+                  </InlineStack>
+
+                  <TextField
+                    label="Corner radius"
+                    value={widgetBorderRadius}
+                    onChange={setWidgetBorderRadius}
+                    type="number"
+                    min={0}
+                    suffix="px"
+                    placeholder="Inherit"
+                    autoComplete="off"
+                  />
+                </BlockStack>
+              )}
 
               {widgetDesign === "benefits" && (
                 <BlockStack gap="200">
