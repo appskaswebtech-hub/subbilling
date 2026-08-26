@@ -31,7 +31,13 @@ model Session {
 model SellingPlanGroup {
   id              String   @id @default(cuid())
   shop            String
+  // Full GID. NOT usable to match the storefront: Liquid exposes a selling plan
+  // GROUP's id only as a hash ("e88ff8fd…"), never as this numeric id.
   shopifyGroupId  String?
+  // The group's single selling plan, as a full GID. Liquid DOES expose a selling
+  // PLAN's id as a number (it is the cart's `selling_plan` value), so this is the
+  // only key that can join a stored plan to what the storefront renders.
+  shopifySellingPlanId String?
   name            String
   interval        String
   intervalCount   Int
@@ -40,11 +46,25 @@ model SellingPlanGroup {
 
   // ── Storefront widget ───────────────────────────────────────
   // Per-plan overrides of the shop-wide AppSettings values. Empty means
-  // "inherit the shop setting". A product shows ONE widget, so when several
-  // plans are attached the newest plan's design wins.
+  // "inherit the shop setting". A product may have several plans attached; the
+  // widget renders whichever one the shopper currently has selected.
   widgetDesign       String @default("")
   // Newline-separated, same format as AppSettings.widgetBenefitChips.
   widgetBenefitChips String @default("") @db.VarChar(1000)
+  // Same "" = inherit convention as widgetDesign. Named to mirror the
+  // AppSettings columns, but note the defaults differ on purpose: AppSettings
+  // holds real values ("#5B4FCB"), a plan holds "inherit".
+  widgetPrimaryColor String @default("")
+  widgetBadgeColor   String @default("")
+  // Nullable rather than "" = inherit: 0 is a legitimate radius, so a numeric
+  // column has no spare value to mean "unset".
+  widgetBorderRadius Int?
+
+  // ── Leftover: unused ────────────────────────────────────────
+  // Added for a custom per-cycle billing schedule whose code was later reverted.
+  // The column is still in the database, so it is declared here to keep schema
+  // and database in step. NOTHING reads it — do not go looking for the feature.
+  customSchedule  String   @default("") @db.VarChar(1000)
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -64,6 +84,13 @@ model Subscription {
   price             Float
   frequency         String
   nextBillingDate   DateTime
+
+  // ── Leftover: unused ──────────────────────────────────────
+  // Same reverted billing-schedule feature as SellingPlanGroup.customSchedule.
+  // Declared only so schema and database agree; nothing reads either column.
+  sellingPlanId     String?
+  scheduleIndex     Int      @default(0)
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

@@ -8,6 +8,50 @@
 (function () {
   'use strict';
 
+  // ── Hold the widget back until the app answers ────────────────
+  // Liquid renders every selling plan group Shopify has on the product, including
+  // ones this app no longer tracks. Showing first and hiding after would flash an
+  // option that is about to vanish, so the widget starts hidden and is revealed
+  // once we know what to keep.
+  //
+  // Applied here, at script-execution time, rather than from Liquid: if this file
+  // never runs the class is never added and the widget renders normally, instead
+  // of being hidden forever by markup nothing is left to undo.
+  //
+  // The inverted default is only safe because EVERY outcome reveals — success,
+  // every failure branch, and a timeout for a request that never returns. Adding
+  // a new exit from the settings fetch without a revealWidgets() call would leave
+  // shops with a blank product page.
+  const PENDING_CLASS = 'sub-plans-pending';
+  const REVEAL_TIMEOUT_MS = 4000;
+  let revealed = false;
+
+  try {
+    document.documentElement.classList.add(PENDING_CLASS);
+  } catch (e) {
+    revealed = true; // nothing was hidden, so nothing needs revealing
+  }
+
+  function revealWidgets() {
+    if (revealed) return;
+    revealed = true;
+    try {
+      document.documentElement.classList.remove(PENDING_CLASS);
+    } catch (e) {}
+  }
+
+  // Backstop: a request that hangs fires none of the branches below, and without
+  // this the widget would stay hidden for as long as the app is unresponsive.
+  setTimeout(function () {
+    if (!revealed) {
+      console.warn(
+        '[KAS] the widget settings request did not answer within ' + REVEAL_TIMEOUT_MS +
+        'ms — showing all selling plans unfiltered rather than leaving the widget hidden.'
+      );
+      revealWidgets();
+    }
+  }, REVEAL_TIMEOUT_MS);
+
   // ── Variant data ──────────────────────────────────────────────
   // Rendered by Liquid into script.sub-product-data, so it is correct on every
   // theme and does not depend on anything the page happens to expose.
@@ -100,7 +144,10 @@
     widget.querySelectorAll('.sub-option[data-plan-id]').forEach((card) => {
       const pid   = card.dataset.planId;
       const price = plans[pid];
-      const allowed = price != null;
+      // Folded in rather than hidden in a separate pass: the line below reassigns
+      // display on EVERY card, so a separate pass would be undone on the next
+      // variant change and the untracked plans would flicker back.
+      const allowed = price != null && isTrackedCard(widget, card);
 
       card.style.display = allowed ? '' : 'none';
 
@@ -143,9 +190,15 @@
   // reimplementing variant filtering, price sync and cart wiring.
 
   // ─── Per-plan overrides ─────────────────────────────────────
-  // Each plan may carry its own design and chips, delivered as a map keyed by
-  // selling plan group id. A product renders ONE widget, so when several plans
-  // are attached the NEWEST plan wins — the same plan the dropdown defaults to.
+  // Each plan may carry its own design, chips and colours, delivered as a map
+  // keyed by selling plan group id. A product renders ONE widget, so the plan
+  // the shopper currently has SELECTED is the one whose appearance is applied —
+  // switching frequency re-renders the widget in that plan's design.
+  //
+  // That includes switching between layout families: a plan set to default or
+  // ribbon collapses the frequency dropdown and shows one row per plan instead.
+  // It stays recoverable because those rows are themselves clickable, and each
+  // click re-resolves the design.
 
   function planWidgetMap(widget) {
     try {
@@ -162,18 +215,179 @@
     return (raw.split('/').pop() || raw).trim();
   }
 
+  // Keyed on the SELLING PLAN id, never the group id.
+  //
+  // Liquid renders `selling_plan_group.id` as a hash
+  // ("e88ff8fdb3c39c89b564859e34542e0b982076d6") while the app stores the group's
+  // numeric Shopify id — so keying on data-group-id could never match, and
+  // because a miss reads as "this plan overrides nothing", the entire per-plan
+  // feature was silently inert. `plan.id` is numeric on both sides; it is the
+  // same value the cart posts as `selling_plan`.
   function planOverride(widget, card) {
     if (!card) return null;
-    return planWidgetMap(widget)[bareId(card.dataset.groupId)] || null;
+    return planWidgetMap(widget)[bareId(card.dataset.planId)] || null;
   }
 
-  // Design for the newest plan available on the current variant, falling back to
-  // the shop-wide setting and finally to whatever Liquid rendered.
+  // ── Untracked plans ─────────────────────────────────────────
+  // `widget.__subKnownPlans` holds the ids the app still tracks, or null meaning
+  // "do not filter". An EMPTY array is not null: it means the app tracks no plans
+  // at all, and every option on the page is therefore an orphan to be hidden.
+  //
+  // Cosmetic only. The group stays live in Shopify and any existing contract on it
+  // keeps billing — /app/cleanup is what actually removes them.
+
+  function initPlanFilter(widget, ids) {
+    // Anything that is not a real list means we could not determine the answer:
+    // a database error server-side, or a server too old to send the field.
+    widget.__subKnownPlans = Array.isArray(ids) ? ids.map(bareId) : null;
+  }
+
+  function isTrackedCard(widget, card) {
+    const known = widget.__subKnownPlans;
+    if (!known) return true;   // filtering off → every card passes
+    return known.indexOf(bareId(card.dataset.planId)) !== -1;
+  }
+
+  // Settings arrive after initWidget has already run applyVariantPlans, so this
+  // repeats the two consequences that function handles when it hides a card.
+  function hideUntrackedPlans(widget) {
+    if (!widget.__subKnownPlans) return;
+
+    let anyVisible   = false;
+    let activeHidden = false;
+
+    widget.querySelectorAll('.sub-option[data-plan-id]').forEach(function (card) {
+      if (isTrackedCard(widget, card)) {
+        // Still subject to variant filtering, which may already have hidden it.
+        if (card.style.display !== 'none') anyVisible = true;
+        return;
+      }
+      if (card.classList.contains('sub-option--active')) activeHidden = true;
+      card.style.display = 'none';
+    });
+
+    // A selection that just disappeared must not stay bound to the cart. Without
+    // this a shopper could check out against the very orphan being hidden.
+    if (activeHidden) {
+      const oneTime = widget.querySelector('.sub-option:first-of-type .sub-option__radio');
+      if (oneTime) {
+        oneTime.checked = true;
+        oneTime.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+
+    // Nothing left to subscribe to → no empty widget. A later variant change
+    // re-runs applyVariantPlans, which restores this if warranted.
+    if (!anyVisible) widget.style.display = 'none';
+  }
+
+  // Says so when the app sent overrides that match nothing on the page.
+  //
+  // This exact failure went unnoticed for a long time precisely because a missed
+  // lookup and "nothing to override" are indistinguishable on screen. Purely a
+  // diagnostic — it changes nothing about what renders.
+  function warnIfNoOverridesMatch(widget) {
+    const keys = Object.keys(planWidgetMap(widget));
+    if (!keys.length) return;
+
+    const cards = widget.querySelectorAll('.sub-option[data-plan-id]');
+    if (!cards.length) return;
+
+    let matched = false;
+    cards.forEach(function (card) {
+      if (keys.indexOf(bareId(card.dataset.planId)) !== -1) matched = true;
+    });
+    if (matched) return;
+
+    console.warn(
+      '[KAS] the app sent per-plan overrides for ' + keys.join(', ') + ' but none of ' +
+      'the ' + cards.length + ' plan(s) on this page match, so every plan is falling ' +
+      'back to the shop-wide appearance. Those keys are selling plan ids — if they ' +
+      'look like group ids or hashes, the server is sending an older payload shape.'
+    );
+  }
+
+  // Which plan the widget is currently presenting. ONE definition, shared by the
+  // design resolver and by refreshFrequencyRow — if those two disagreed, the
+  // design and the chips inside it would describe different plans.
+  function selectedPlanCard(widget) {
+    const cards = availablePlanCards(widget);
+    if (!cards.length) return null;
+
+    // 1. What the shopper actually picked, when it is a plan.
+    const checked = widget.querySelector('.sub-option__radio:checked');
+    if (checked && checked.value) {
+      const own = cards.find((c) => c.dataset.planId === String(checked.value));
+      if (own) return own;
+    }
+
+    // 2. Otherwise whatever the dropdown is showing. This is the "One-time
+    //    purchase" case: the widget keeps the last plan's appearance rather than
+    //    snapping back to the shop default the moment one-time is selected.
+    const select = widget.querySelector('.sub-arctic__select');
+    if (select && select.value) {
+      const shown = cards.find((c) => c.dataset.planId === String(select.value));
+      if (shown) return shown;
+    }
+
+    // 3. First paint, before anything is selected: newest, as it always was.
+    return cards[0];
+  }
+
+  // Colours for the selected plan, layered over the shop-wide values.
+  //
+  // Every property is either SET or REMOVED on each call — never skipped. The
+  // original code could only ever add a colour, so skipping was safe there; now
+  // that selection can move from a plan with a custom colour to one without,
+  // a skipped write would leave the previous plan's colour on screen.
+  //
+  // Removing rather than writing a default is what lets the theme's own CSS
+  // value win when neither the plan nor the shop has an opinion.
+  function applyPlanColors(widget, card) {
+    const style = widget.style;
+    const own   = planOverride(widget, card) || {};
+    const shop  = widget.__subShopColors || {};
+
+    const primary = own.primaryColor || shop.primaryColor || '';
+    const badge   = own.badgeColor   || shop.badgeColor   || '';
+    const radius  = (own.borderRadius === undefined || own.borderRadius === null)
+      ? shop.borderRadius
+      : own.borderRadius;
+
+    if (primary) {
+      style.setProperty('--sub-accent',        primary);
+      style.setProperty('--sub-border-active', primary);
+      // Alpha suffixes match the Liquid template's inline style, so the app
+      // settings and the theme setting produce the same visual treatment.
+      style.setProperty('--sub-accent-light',  primary + '18');
+      style.setProperty('--sub-bg-active',     primary + '0f');
+      style.setProperty('--sub-accent-ring',   primary + '26');
+      style.setProperty('--sub-shadow-active', '0 0 0 3px ' + primary + '26');
+    } else {
+      style.removeProperty('--sub-accent');
+      style.removeProperty('--sub-border-active');
+      style.removeProperty('--sub-accent-light');
+      style.removeProperty('--sub-bg-active');
+      style.removeProperty('--sub-accent-ring');
+      style.removeProperty('--sub-shadow-active');
+    }
+
+    if (badge) style.setProperty('--sub-badge', badge);
+    else       style.removeProperty('--sub-badge');
+
+    if (radius === undefined || radius === null) style.removeProperty('--sub-radius');
+    else                                         style.setProperty('--sub-radius', radius + 'px');
+  }
+
+  // Design for the selected plan, falling back to the shop-wide setting and
+  // finally to whatever Liquid rendered.
   function resolvePlanDesign(widget) {
-    const newest = availablePlanCards(widget)[0];
-    const own    = planOverride(widget, newest);
+    const own = planOverride(widget, selectedPlanCard(widget));
     if (own && own.design) return own.design;
-    return widget.dataset.shopDesign || widget.dataset.design || '';
+    // themeDesign, NOT dataset.design: applyDesign writes dataset.design, so
+    // reading it back here would make a plan with no override inherit whichever
+    // design the PREVIOUS selection applied instead of the shop default.
+    return widget.dataset.shopDesign || widget.dataset.themeDesign || '';
   }
 
   function availablePlanCards(widget) {
@@ -245,7 +459,10 @@
     if (!radio) return;
     radio.checked = true;
     radio.dispatchEvent(new Event('change', { bubbles: true }));
-    refreshFrequencyRow(widget);
+    // The dispatch above already reaches the design handlers, but this runs even
+    // when a listener is missing — and choosing a plan whose design differs must
+    // re-render the widget, not only refresh the row inside the old design.
+    applyDesign(widget);
   }
 
   function refreshFrequencyRow(widget) {
@@ -266,9 +483,12 @@
 
     // Rebuild options only when the available set actually changed, so the
     // merchant's current choice is not reset on every 400ms variant poll.
-    // The design is part of the signature because the two designs label their
-    // options differently and the design can change after the settings fetch.
-    const signature = cards.map((c) => c.dataset.planId).join(',') + '|' + (isBenefits ? 'b' : 'a');
+    //
+    // The design is deliberately NOT part of this key: every design now labels
+    // options with the plan title, so a design flip cannot change the list. The
+    // design-dependent parts of this function — the Subscribe & Save label, the
+    // badge, the compare price and the chips — all run below, outside the guard.
+    const signature = cards.map((c) => c.dataset.planId).join(',');
     if (select.dataset.signature !== signature) {
       select.dataset.signature = signature;
       select.innerHTML = '';
@@ -283,15 +503,10 @@
           ? title.textContent.replace(badge ? badge.textContent : '', '').trim()
           : card.dataset.planId;
 
-        // Benefits spells the cadence out in full: the plan carries its own
-        // interval label ("Every 10 Weeks"), which reads as "Delivery every 10
-        // weeks" — independent of whatever the merchant named the plan.
-        if (isBenefits) {
-          const interval = card.dataset.planOption || planTitle;
-          opt.textContent = 'Delivery ' + String(interval).toLowerCase();
-        } else {
-          opt.textContent = planTitle;
-        }
+        // The merchant's plan title, in every design. Benefits used to substitute
+        // the cadence here ("delivery every 10 weeks"); it now reads the same
+        // name the merchant sees in the admin, so the two designs agree.
+        opt.textContent = planTitle;
         select.appendChild(opt);
       });
     }
@@ -301,8 +516,10 @@
     const isPlanChecked = cards.some((c) => c.dataset.planId === checkedId);
     if (isPlanChecked) select.value = checkedId;
 
-    const shownId   = select.value || cards[0].dataset.planId;
-    const shownCard = cards.find((c) => c.dataset.planId === shownId) || cards[0];
+    // Same helper the design resolver uses — the price, badge and chips below
+    // must describe the plan whose design is on screen, not a different one.
+    // It is called AFTER `select.value` is synced above so both agree.
+    const shownCard = selectedPlanCard(widget) || cards[0];
 
     const priceEl = row.querySelector('.sub-arctic__price');
     const price   = parseInt(shownCard.dataset.planPrice, 10);
@@ -418,12 +635,12 @@
   // window.__subWidget so "is the new code actually live?" is one console line
   // rather than a round of screenshots — the theme asset is CDN-cached and a
   // deploy is easy to believe has landed when it has not.
-  const WIDGET_BUILD = '2026-08-18.liquid-sourced-data';
+  const WIDGET_BUILD = '2026-08-22.hide-untracked-plans';
 
   // The payload shape this build needs. A server running older code answers 200
   // with a silently smaller object — indistinguishable from success unless we
   // check. Keep in step with WIDGET_PAYLOAD_VERSION in widget-settings.server.ts.
-  const EXPECTED_PAYLOAD_VERSION = 2;
+  const EXPECTED_PAYLOAD_VERSION = 5;
 
   // One storefront path — the proxy REPLACES `/apps/subscriptions` with the
   // configured proxy URL and appends the rest, so this same request lands on
@@ -434,24 +651,16 @@
   const SETTINGS_URL = '/apps/subscriptions/widget-settings';
 
   function applySettings(widget, s) {
-    const style = widget.style;
-
-    if (s.primaryColor) {
-      style.setProperty('--sub-accent',        s.primaryColor);
-      style.setProperty('--sub-border-active', s.primaryColor);
-      // Alpha suffixes match the Liquid template's inline style, so the app
-      // settings and the theme setting produce the same visual treatment.
-      style.setProperty('--sub-accent-light',  s.primaryColor + '18');
-      style.setProperty('--sub-bg-active',     s.primaryColor + '0f');
-      style.setProperty('--sub-accent-ring',   s.primaryColor + '26');
-      style.setProperty('--sub-shadow-active', '0 0 0 3px ' + s.primaryColor + '26');
-    }
-
-    if (s.badgeColor) style.setProperty('--sub-badge', s.badgeColor);
-
-    if (s.borderRadius !== undefined && s.borderRadius !== null) {
-      style.setProperty('--sub-radius', s.borderRadius + 'px');
-    }
+    // Kept so per-plan colours have something to fall BACK to. A plan colour
+    // layers on top of these, and when the shopper moves to a plan that
+    // overrides nothing they have to be restorable.
+    widget.__subShopColors = {
+      primaryColor: s.primaryColor || '',
+      badgeColor:   s.badgeColor   || '',
+      borderRadius: (s.borderRadius === undefined || s.borderRadius === null)
+        ? null
+        : s.borderRadius,
+    };
 
     // The one-time option is the first .sub-option and is the only one without
     // a plan id. Hidden rather than removed so the rest of the widget's logic
@@ -471,24 +680,33 @@
     // set before applyDesign, which resolves the winning design from this map.
     if (s.planWidgets && typeof s.planWidgets === 'object') {
       widget.dataset.planWidgets = JSON.stringify(s.planWidgets);
+      warnIfNoOverridesMatch(widget);
     }
+
+    // Drop plans the app no longer tracks before applyDesign runs, so the
+    // collapsing designs build their dropdown from the surviving cards rather
+    // than building it and then having entries vanish.
+    initPlanFilter(widget, s.knownPlanIds);
+    hideUntrackedPlans(widget);
 
     // Layout variant. CSS keys off this for `default` and `ribbon`; `arctic`
     // and `benefits` additionally need the dropdown row built.
     //
     // The shop-wide value is kept separately as the fallback resolvePlanDesign
-    // uses when the newest plan sets no design of its own. Overrides whatever
+    // uses when the selected plan sets no design of its own. Overrides whatever
     // Liquid rendered; when the app is unreachable the markup's design stands,
     // which is why colours have always worked while the design did not —
     // colours had no such fallback to lose.
     if (s.design) widget.dataset.shopDesign = s.design;
     applyDesign(widget);
 
-    // Keep the Arctic row's selected state in step when the shopper picks
-    // one-time (or any plan) through the original controls.
+    // Keep the collapsed row's selected state in step when the shopper picks
+    // one-time (or any plan) through the original controls. applyDesign rather
+    // than refreshFrequencyRow alone: the selection can change the design, and
+    // applyDesign refreshes the row itself for the designs that have one.
     widget.addEventListener('change', function (e) {
       if (e.target.classList && e.target.classList.contains('sub-option__radio')) {
-        refreshFrequencyRow(widget);
+        applyDesign(widget);
       }
     });
   }
@@ -514,17 +732,38 @@
 
     const w = document.querySelector('.sub-widget');
 
-    // Which plan is dictating the design, and what overrides arrived. Without
-    // this, "newest plan wins" is invisible and unfalsifiable from a screenshot.
-    let newestLine = '(no widget)';
+    // Which plan is dictating the appearance and which layer won it. The design
+    // follows the SELECTED plan, so reporting the newest one here would point
+    // debugging at the wrong plan entirely.
+    let selectedLine = '(no widget)';
+    let sourceLine   = '(none)';
     let overrideLine = '(none)';
+    let trackedLine  = '(no widget)';
     if (w) {
-      const newest = availablePlanCards(w)[0];
-      newestLine = newest
-        ? 'plan ' + newest.dataset.planId + ' / group ' + bareId(newest.dataset.groupId)
+      // The lookup KEY, spelled out. When overrides mysteriously do nothing, the
+      // only question worth asking is whether this value appears in the list of
+      // keys below it — so both are printed adjacent and in the same shape.
+      const card = selectedPlanCard(w);
+      selectedLine = card
+        ? 'plan ' + bareId(card.dataset.planId) + ' (group hash ' + card.dataset.groupId + ')'
         : '(no plans for this variant)';
+
+      const own = planOverride(w, card);
+      sourceLine = (own && own.design)
+        ? 'plan override'
+        : (w.dataset.shopDesign ? 'shop setting' : 'theme block');
+
       const keys = Object.keys(planWidgetMap(w));
       overrideLine = keys.length ? keys.join(', ') : '(none)';
+
+      const known = w.__subKnownPlans;
+      if (!Array.isArray(known)) {
+        trackedLine = '(not filtering — no answer from the app)';
+      } else if (known.length) {
+        trackedLine = known.join(', ');
+      } else {
+        trackedLine = '(app tracks NO plans — all options hidden)';
+      }
     }
 
     box.textContent =
@@ -540,8 +779,11 @@
       'design (theme) : ' + (report.designFromTheme || '(none)') + '\n' +
       'design (shop)  : ' + (report.design || '(none)') + '\n' +
       'design applied : ' + (w ? (w.dataset.design || '(none)') + '' : '(no widget)') + '\n' +
-      'newest plan    : ' + newestLine + '\n' +
-      'plan overrides : ' + overrideLine + '\n' +
+      'design from    : ' + sourceLine + '\n' +
+      'lookup key     : ' + selectedLine + '\n' +
+      'override keys  : ' + overrideLine + '\n' +
+      'tracked plans  : ' + trackedLine + '\n' +
+      'widget gate    : ' + (revealed ? 'revealed' : 'PENDING (hidden)') + '\n' +
       'frequency row  : ' + (document.querySelector('.sub-arctic') ? 'built' : 'not built');
   }
 
@@ -579,14 +821,18 @@
             'chosen design cannot be applied. Check the App proxy URL in the ' +
             'Partner Dashboard.'
           );
+          // Cannot determine which plans are tracked → show them all rather than
+          // leaving the widget hidden.
+          revealWidgets();
           return null;
         }
         return r.json();
       })
       .then(function (s) {
-        if (!s) return;
+        if (!s) { revealWidgets(); return; }
         if (s.error) {
           console.warn('[KAS] widget settings returned an error: ' + s.error);
+          revealWidgets();
           return;
         }
         report.settings = s;
@@ -604,6 +850,9 @@
             'missing until it is redeployed (and its database migrated). Falling back to the ' +
             'theme block\'s own settings.'
           );
+          // An older server cannot send knownPlanIds, so there is nothing to
+          // filter by. Reveal now; applySettings below will leave the list alone.
+          revealWidgets();
         }
 
         if (!s.design) {
@@ -625,6 +874,11 @@
             );
           }
         });
+
+        // Every widget has now been filtered, so what remains is real. Outside the
+        // loop's try/catch on purpose: applySettings throwing for one widget must
+        // not leave the entire page hidden.
+        revealWidgets();
       })
       .catch(function (err) {
         // Genuine request failure only: anything thrown while applying settings
@@ -636,21 +890,33 @@
           (err && err.message ? err.message : 'network error') +
           '. The widget falls back to the theme\'s styling.'
         );
+        // Unreachable app → unfiltered widget, never a hidden one.
+        revealWidgets();
       });
   }
 
   // Designs whose plan rows collapse into a single row with a frequency picker.
   const COLLAPSING_DESIGNS = ['arctic', 'benefits'];
 
+  // Re-derives the whole appearance from whichever plan is currently selected.
+  // Safe to call from a change handler: nothing on this path dispatches an
+  // event, so it cannot re-enter. Do not add one.
   function applyDesign(widget) {
-    // Resolve first: which plan is newest can change with the variant, so the
-    // design is re-derived here rather than assumed fixed for the page.
+    // Resolve first: both the selection and the variant can change which plan
+    // this is, so the design is re-derived here rather than assumed fixed.
+    const card   = selectedPlanCard(widget);
     const design = resolvePlanDesign(widget);
     if (design) widget.dataset.design = design;
+
+    applyPlanColors(widget, card);
 
     if (COLLAPSING_DESIGNS.indexOf(widget.dataset.design) === -1) {
       // Non-collapsing design: the per-plan rows are the UI. Hide the collapsed
       // row if an earlier resolution built one, or it would show alongside them.
+      //
+      // The rows themselves need no un-hiding — under arctic/benefits they are
+      // hidden by CSS `display:none !important`, never inline, which is also why
+      // availablePlanCards (which tests the INLINE style) still sees them.
       const row = widget.querySelector('.sub-arctic');
       if (row) row.style.display = 'none';
       return;
@@ -661,7 +927,13 @@
 
   function init() {
     const widgets = document.querySelectorAll('.sub-widget');
-    if (!widgets.length) return;
+    if (!widgets.length) {
+      // Nothing to hide, and nothing will fetch settings — drop the marker so a
+      // widget injected later (quick-view, AJAX section render) is not caught by
+      // a rule that now has nothing left to remove it.
+      revealWidgets();
+      return;
+    }
     widgets.forEach(initWidget);
 
     // Build from the markup FIRST. Liquid renders data-design at page load, so
@@ -678,6 +950,15 @@
     const savingsEl = widget.querySelector('.sub-widget__savings');
     if (!radios.length) return;
 
+    // Snapshot the theme's own design BEFORE anything can overwrite it.
+    // applyDesign writes data-design, so without a pristine copy the last
+    // resolution's value becomes the fallback for the next one — and a plan
+    // with no override would inherit the previously selected plan's design
+    // rather than the shop default. Mirrors how data-theme-chips works.
+    if (widget.dataset.themeDesign === undefined) {
+      widget.dataset.themeDesign = widget.dataset.design || '';
+    }
+
     radios.forEach((radio) => {
       if (radio.checked) {
         setActive(radio, cards, savingsEl);
@@ -687,6 +968,10 @@
         setActive(radio, cards, savingsEl);
         updatePagePrice(radio);
         syncSellingPlan(radio.value);
+        // Selecting a different plan can change the whole appearance, including
+        // the layout family. Registered here rather than only in applySettings
+        // so clicking a plan row works even before the settings fetch lands.
+        applyDesign(widget);
       });
     });
 

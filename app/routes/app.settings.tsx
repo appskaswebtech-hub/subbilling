@@ -205,9 +205,16 @@ export default function Settings() {
     );
   }
 
+  // One card, one tab. These used to also fire on "general", which re-rendered the
+  // Billing and Customer Portal cards underneath Notifications — the same two cards
+  // their own tabs already own.
+  //
+  // Note this only controls VISIBILITY. handleSave posts from React state rather
+  // than from mounted inputs, so every field is still submitted whichever tab is
+  // open; the blanket upsert in the action depends on that.
   const showNotifications = activeTab === "general";
-  const showBilling       = activeTab === "general" || activeTab === "billing";
-  const showPortal        = activeTab === "general" || activeTab === "portal";
+  const showBilling       = activeTab === "billing";
+  const showPortal        = activeTab === "portal";
   const showWebhooks      = activeTab === "webhooks";
 
   return (

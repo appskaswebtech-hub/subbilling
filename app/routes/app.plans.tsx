@@ -84,6 +84,10 @@ type PlanGroup = {
   widgetDesign?: string;
   /** Newline-separated; parse with parseBenefitChips. */
   widgetBenefitChips?: string;
+  /** "" / null = inherit the shop-wide value. */
+  widgetPrimaryColor?: string;
+  widgetBadgeColor?: string;
+  widgetBorderRadius?: number | null;
   productCount?: number;
   assigned?: AssignedProduct[];
 };
@@ -97,6 +101,10 @@ type PlanFormValues = {
   /** "" = inherit the shop-wide widget design. */
   widgetDesign: string;
   benefitChips: string[];
+  /** All "" = inherit the shop-wide value. Radius is a string for the TextField. */
+  widgetPrimaryColor: string;
+  widgetBadgeColor: string;
+  widgetBorderRadius: string;
 };
 
 // Offered in the plan editor. "" inherits Settings → Widget designs; the rest
@@ -108,6 +116,44 @@ const WIDGET_DESIGN_OPTIONS = [
   { label: "Ribbon",           value: "ribbon" },
   { label: "Benefits",         value: "benefits" },
 ];
+
+/**
+ * Native colour picker paired with the hex TextField beside it.
+ *
+ * Polaris has no colour input, and the shop-level settings page never grew one —
+ * its colours are read-only there. The pairing matters for the "inherit"
+ * semantics: `<input type="color">` cannot represent "unset" (it always reports
+ * some colour), so the TextField stays the source of truth and the swatch is
+ * only a way to fill it in. Clearing the text is how a merchant goes back to
+ * inheriting.
+ */
+function ColorSwatch({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <input
+      type="color"
+      aria-label="Pick a colour"
+      // Falls back to the shop default purely so the swatch has something to
+      // show while the field is empty; it is not written back until picked.
+      value={/^#[0-9a-fA-F]{6}$/.test(value) ? value : "#5B4FCB"}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: "36px",
+        height: "36px",
+        padding: 0,
+        border: "0.5px solid var(--p-color-border)",
+        borderRadius: "8px",
+        background: "none",
+        cursor: "pointer",
+      }}
+    />
+  );
+}
 
 type ShopTier = "free" | "basic" | "pro" | "advanced";
 
@@ -243,6 +289,9 @@ function defaultPlanFormValues(): PlanFormValues {
     discountType: "percentage",
     widgetDesign: "",
     benefitChips: DEFAULT_BENEFIT_CHIPS,
+    widgetPrimaryColor: "",
+    widgetBadgeColor: "",
+    widgetBorderRadius: "",
   };
 }
 
@@ -250,6 +299,27 @@ function formatIntervalLabel(interval: string, intervalCount: number) {
   return `Every ${intervalCount} ${
     interval.charAt(0) + interval.slice(1).toLowerCase()
   }${intervalCount > 1 ? "s" : ""}`;
+}
+
+/**
+ * "" (inherit) or a validated `#rrggbb`.
+ *
+ * Deliberately lenient rather than an error: this value is written straight into
+ * a CSS custom property on the storefront, where a malformed one does not fail
+ * loudly — it just makes the widget look broken for every shopper on that plan.
+ * Falling back to inherit keeps the widget correct.
+ */
+function normaliseHexColor(raw: FormDataEntryValue | null): string {
+  const value = ((raw as string | null) ?? "").trim();
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : "";
+}
+
+/** null (inherit) or a non-negative integer. 0 is a legitimate radius. */
+function normaliseRadius(raw: FormDataEntryValue | null): number | null {
+  const value = ((raw as string | null) ?? "").trim();
+  if (!value) return null;
+  const n = Number.parseInt(value, 10);
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 function merchantCode(name: string) {
@@ -448,6 +518,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
           `#graphql
           query getSellingPlanGroupProducts($id: ID!) {
             sellingPlanGroup(id: $id) {
+              sellingPlans(first: 1) { edges { node { id } } }
               products(first: 50) {
                 edges {
                   node { id title featuredImage { url } }
@@ -475,8 +546,28 @@ export async function loader({ request }: LoaderFunctionArgs) {
         );
         const result = await res.json();
         const spg = result?.data?.sellingPlanGroup;
+
+        // Backfill the selling plan id for plans created before the column
+        // existed. It rides along on the query this loader already makes, so it
+        // costs no extra API call — and without it the storefront has no key to
+        // look this plan's appearance up by, so its overrides stay inert.
+        const livePlanId = spg?.sellingPlans?.edges?.[0]?.node?.id ?? null;
+        let shopifySellingPlanId = g.shopifySellingPlanId;
+        if (livePlanId && shopifySellingPlanId !== livePlanId) {
+          try {
+            await prisma.sellingPlanGroup.update({
+              where: { id: g.id },
+              data:  { shopifySellingPlanId: livePlanId },
+            });
+            shopifySellingPlanId = livePlanId;
+          } catch (err) {
+            // A page load must not fail over a self-healing write.
+            console.error("[plans] could not backfill shopifySellingPlanId:", err);
+          }
+        }
+
         const { assigned, productCount } = buildAssignedList(spg);
-        return { ...g, productCount, assigned };
+        return { ...g, shopifySellingPlanId, productCount, assigned };
       } catch {
         return { ...g, productCount: 0, assigned: [] };
       }
@@ -566,6 +657,13 @@ export async function action({ request }: ActionFunctionArgs) {
   // way, so switching design back and forth does not lose the merchant's text.
   const widgetDesign       = ((formData.get("widgetDesign") as string) || "").trim();
   const widgetBenefitChips = serializeBenefitChips(formData.getAll("benefitChip") as string[]);
+  // Colours follow the same "" = inherit rule. Anything that is not a valid
+  // 6-digit hex is stored as "" rather than rejected: the value lands in a CSS
+  // custom property on the storefront, so a malformed one would silently break
+  // the widget's styling for every shopper on that plan.
+  const widgetPrimaryColor = normaliseHexColor(formData.get("widgetPrimaryColor"));
+  const widgetBadgeColor   = normaliseHexColor(formData.get("widgetBadgeColor"));
+  const widgetBorderRadius = normaliseRadius(formData.get("widgetBorderRadius"));
 
   // ── Create ─────────────────────────────────────────────────
   if (intent === "create") {
@@ -669,10 +767,18 @@ export async function action({ request }: ActionFunctionArgs) {
           "No group ID returned. Check write_products + write_purchase_options scopes.",
       });
 
+    // The mutation has always selected this; it was simply discarded. It is the
+    // key the storefront looks per-plan appearance up by, so a plan created
+    // without it would silently ignore its own design and colours.
+    const sellingPlanId =
+      result?.data?.sellingPlanGroupCreate?.sellingPlanGroup?.sellingPlans
+        ?.edges?.[0]?.node?.id ?? null;
+
     await prisma.sellingPlanGroup.create({
       data: {
         shop: session.shop,
         shopifyGroupId: groupId,
+        shopifySellingPlanId: sellingPlanId,
         name,
         interval,
         intervalCount,
@@ -680,6 +786,9 @@ export async function action({ request }: ActionFunctionArgs) {
         discountType,
         widgetDesign,
         widgetBenefitChips,
+        widgetPrimaryColor,
+        widgetBadgeColor,
+        widgetBorderRadius,
       },
     });
 
@@ -717,8 +826,12 @@ export async function action({ request }: ActionFunctionArgs) {
       discountType,
     });
 
+    // Hoisted so the local write below can persist it: this is the storefront's
+    // lookup key, and an edit is a natural second chance to capture it for a plan
+    // created before the column existed.
+    let sellingPlanId: string | null = null;
+
     if (group.shopifyGroupId) {
-      let sellingPlanId: string | null = null;
       try {
         sellingPlanId = await getFirstSellingPlanId(
           admin.graphql,
@@ -795,7 +908,21 @@ export async function action({ request }: ActionFunctionArgs) {
 
     await prisma.sellingPlanGroup.update({
       where: { id },
-      data: { name, interval, intervalCount, discount, discountType, widgetDesign, widgetBenefitChips },
+      data: {
+        name,
+        interval,
+        intervalCount,
+        discount,
+        discountType,
+        widgetDesign,
+        widgetBenefitChips,
+        widgetPrimaryColor,
+        widgetBadgeColor,
+        widgetBorderRadius,
+        // Only when resolved — a group with no Shopify counterpart must not have
+        // an existing key overwritten with null.
+        ...(sellingPlanId ? { shopifySellingPlanId: sellingPlanId } : {}),
+      },
     });
 
     return json({ ok: true, error: null, intent: "update" });
@@ -2253,6 +2380,15 @@ export default function Plans() {
   const [discountType, setDiscountType] = useState(defaultPlanFormValues().discountType);
   const [widgetDesign, setWidgetDesign] = useState(defaultPlanFormValues().widgetDesign);
   const [benefitChips, setBenefitChips] = useState<string[]>(defaultPlanFormValues().benefitChips);
+  const [widgetPrimaryColor, setWidgetPrimaryColor] = useState(
+    defaultPlanFormValues().widgetPrimaryColor,
+  );
+  const [widgetBadgeColor, setWidgetBadgeColor] = useState(
+    defaultPlanFormValues().widgetBadgeColor,
+  );
+  const [widgetBorderRadius, setWidgetBorderRadius] = useState(
+    defaultPlanFormValues().widgetBorderRadius,
+  );
 
   // ── Product picker modal state ──
   const [productPickerOpen, setProductPickerOpen] = useState(false);
@@ -2497,6 +2633,11 @@ export default function Plans() {
     // Chips are only meaningful under the benefits design, but they are saved
     // either way so toggling the design does not discard the merchant's text.
     benefitChips.forEach((c) => fd.append("benefitChip", c));
+    // Always posted, empty included: an empty value is the merchant clearing an
+    // override back to "inherit", which has to reach the server as a real change.
+    fd.append("widgetPrimaryColor", widgetPrimaryColor.trim());
+    fd.append("widgetBadgeColor", widgetBadgeColor.trim());
+    fd.append("widgetBorderRadius", widgetBorderRadius.trim());
     submit(fd, { method: "post" });
   }
 
@@ -2511,6 +2652,9 @@ export default function Plans() {
     setDiscountType(defaults.discountType);
     setWidgetDesign(defaults.widgetDesign);
     setBenefitChips(defaults.benefitChips);
+    setWidgetPrimaryColor(defaults.widgetPrimaryColor);
+    setWidgetBadgeColor(defaults.widgetBadgeColor);
+    setWidgetBorderRadius(defaults.widgetBorderRadius);
     setEditorOpen(true);
   }
 
@@ -2526,6 +2670,12 @@ export default function Plans() {
     // empty editor, matching how the shop-level settings page behaves.
     const stored = parseBenefitChips(plan.widgetBenefitChips);
     setBenefitChips(stored.length ? stored : DEFAULT_BENEFIT_CHIPS);
+    setWidgetPrimaryColor(plan.widgetPrimaryColor ?? "");
+    setWidgetBadgeColor(plan.widgetBadgeColor ?? "");
+    // null is "inherit" and must open as an empty field, not as "0".
+    setWidgetBorderRadius(
+      typeof plan.widgetBorderRadius === "number" ? String(plan.widgetBorderRadius) : "",
+    );
     setEditorOpen(true);
   }
 
@@ -2535,6 +2685,9 @@ export default function Plans() {
     const defaults = defaultPlanFormValues();
     setWidgetDesign(defaults.widgetDesign);
     setBenefitChips(defaults.benefitChips);
+    setWidgetPrimaryColor(defaults.widgetPrimaryColor);
+    setWidgetBadgeColor(defaults.widgetBadgeColor);
+    setWidgetBorderRadius(defaults.widgetBorderRadius);
   }
 
   function handleRemove(
@@ -3072,8 +3225,23 @@ export default function Plans() {
               <TextField
                 label="Every how many intervals?"
                 value={intervalCount}
-                onChange={setIntervalCount}
+                // `min` below governs the stepper and native form validation only.
+                // It does NOT stop typing: a number input still accepts "-", "e"
+                // and ".", which is how this field reached -4. Stripping to digits
+                // makes the invalid value unreachable rather than merely rejected
+                // on save. "" stays allowed so the field can be cleared and retyped.
+                onChange={(v) => setIntervalCount(v.replace(/\D/g, ""))}
+                // Normalise on the way out, not per keystroke — clamping inside
+                // onChange rewrites the value mid-edit and fights the typist.
+                onBlur={() =>
+                  setIntervalCount((c) => {
+                    const n = Number.parseInt(c, 10);
+                    return Number.isInteger(n) && n >= 1 ? String(n) : "1";
+                  })
+                }
                 type="number"
+                min={1}
+                step={1}
                 autoComplete="off"
                 helpText='"1" = every month, "3" = every 3 months'
               />
@@ -3084,13 +3252,45 @@ export default function Plans() {
                   { label: "Fixed amount", value: "fixed_amount" },
                 ]}
                 value={discountType}
-                onChange={setDiscountType}
+                onChange={(v) => {
+                  setDiscountType(v);
+                  // Switching to percentage can strand an out-of-range fixed
+                  // amount — "150 off" silently becomes "150%". The field's own
+                  // cap cannot catch that, because the value itself never
+                  // changes. Clamp here so the ceiling actually holds.
+                  if (v === "percentage") {
+                    setDiscount((d) => {
+                      const n = Number.parseFloat(d);
+                      return Number.isFinite(n) && n > 100 ? "100" : d;
+                    });
+                  }
+                }}
               />
               <TextField
                 label={discountType === "fixed_amount" ? "Discount (fixed amount)" : "Discount (%)"}
                 value={discount}
-                onChange={setDiscount}
+                // Discount is a DECIMAL — the server reads it with parseFloat and
+                // 12.5% is valid — so this must NOT reuse the interval field's
+                // digits-only strip, which would silently delete the fraction.
+                // Digits and a single dot only; "-" and "e" are dropped so a
+                // negative is unreachable rather than rejected on save.
+                onChange={(v) =>
+                  setDiscount(v.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1"))
+                }
+                // Normalise on the way out: "" and ".5" are reasonable to type,
+                // not to keep. The 100 ceiling is percentage-only — a fixed
+                // amount of 150 off is legitimate, so capping both would break it.
+                onBlur={() =>
+                  setDiscount((d) => {
+                    const n = Number.parseFloat(d);
+                    if (!Number.isFinite(n) || n < 0) return "0";
+                    if (discountType === "percentage" && n > 100) return "100";
+                    return String(n);
+                  })
+                }
                 type="number"
+                min={0}
+                max={discountType === "percentage" ? 100 : undefined}
                 autoComplete="off"
                 suffix={discountType === "percentage" ? "%" : undefined}
                 helpText="Set to 0 for no discount"
@@ -3101,8 +3301,55 @@ export default function Plans() {
                 options={WIDGET_DESIGN_OPTIONS}
                 value={widgetDesign}
                 onChange={setWidgetDesign}
-                helpText="A product shows one widget. When several plans are attached, the newest plan's design is the one used."
+                helpText="Applied while this plan is the one the shopper has selected. Several plans can share a product, each with its own design."
               />
+
+              <BlockStack gap="200">
+                <Text as="p" variant="bodySm" fontWeight="medium">
+                  Colours for this plan
+                </Text>
+                <Text as="p" variant="bodySm" tone="subdued">
+                  Leave a field empty to use the shop-wide setting from Settings →
+                  Widget. Clearing a field again returns that plan to the shop value.
+                </Text>
+
+                <InlineStack gap="200" blockAlign="end" wrap={false}>
+                  <ColorSwatch value={widgetPrimaryColor} onChange={setWidgetPrimaryColor} />
+                  <div style={{ flex: 1 }}>
+                    <TextField
+                      label="Primary colour"
+                      value={widgetPrimaryColor}
+                      onChange={setWidgetPrimaryColor}
+                      placeholder="Inherit"
+                      autoComplete="off"
+                    />
+                  </div>
+                </InlineStack>
+
+                <InlineStack gap="200" blockAlign="end" wrap={false}>
+                  <ColorSwatch value={widgetBadgeColor} onChange={setWidgetBadgeColor} />
+                  <div style={{ flex: 1 }}>
+                    <TextField
+                      label="Badge colour"
+                      value={widgetBadgeColor}
+                      onChange={setWidgetBadgeColor}
+                      placeholder="Inherit"
+                      autoComplete="off"
+                    />
+                  </div>
+                </InlineStack>
+
+                <TextField
+                  label="Corner radius"
+                  value={widgetBorderRadius}
+                  onChange={setWidgetBorderRadius}
+                  type="number"
+                  min={0}
+                  suffix="px"
+                  placeholder="Inherit"
+                  autoComplete="off"
+                />
+              </BlockStack>
 
               {widgetDesign === "benefits" && (
                 <BlockStack gap="200">

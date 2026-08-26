@@ -5,29 +5,26 @@ name = "Smart Subscriptions"
 application_url = "https://subscription.kaswebtechsolutions.com"
 embedded = true
 
-[build]
-automatically_update_urls_on_dev = true
-
 [webhooks]
 api_version = "2026-04"
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/app/uninstalled"
-  topics = [ "app/uninstalled" ]
-
-  [[webhooks.subscriptions]]
   uri = "/webhooks"
   topics = [
-  "subscription_contracts/update",
-  "subscription_billing_attempts/success",
+  "subscription_contracts/create",
   "subscription_billing_attempts/failure",
-  "subscription_contracts/create"
+  "subscription_billing_attempts/success",
+  "subscription_contracts/update"
 ]
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
@@ -37,12 +34,9 @@ scopes = "customer_read_customers,customer_read_own_subscription_contracts,read_
 redirect_urls = [ "https://subscription.kaswebtechsolutions.com/api/auth" ]
 
 [app_proxy]
-# Relative on purpose. The proxy REPLACES `/{prefix}/{subpath}` with this URL
-# rather than appending to it, so a bare host would forward
-# /apps/subscriptions/billing-history to /billing-history and 404 — the routes
-# live at /apps/subscriptions/*. A leading-slash value is resolved by the CLI
-# against the current `application_url`, so it follows the dev tunnel and
-# production without a constant that can go stale.
-url = "/apps/subscriptions"
+url = "https://subscription.kaswebtechsolutions.com/apps/subscriptions"
 subpath = "subscriptions"
 prefix = "apps"
+
+[build]
+automatically_update_urls_on_dev = true

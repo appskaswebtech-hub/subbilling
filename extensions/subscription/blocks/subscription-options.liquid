@@ -160,9 +160,11 @@
         {%- endfor -%}
 
         {%- comment -%}
-          The interval label as the plan was created with it — "Every 10 Weeks".
-          The benefits design lowercases it into "Delivery every 10 weeks" for its
-          dropdown, so that reading never depends on how the merchant named the plan.
+          data-plan-option is the interval label as the plan was created with it —
+          "Every 10 Weeks". The Benefits design used to render its dropdown from
+          this; every design now labels options with the merchant's plan title
+          (group.name, rendered below), so nothing in the widget reads it any
+          more. It is kept because a theme's custom CSS or JS may target it.
         {%- endcomment -%}
         <label
           class="sub-option"
@@ -171,6 +173,12 @@
           data-plan-price="{{ final_price }}"
           data-discount="{{ discount_pct }}"
           data-plan-option="{{ plan.options.first.value | default: plan.name }}"
+          {%- comment -%}
+            data-group-id is a HASH ("e88ff8fd…"), not the group's numeric Shopify
+            id — Liquid never exposes that one. It is kept for debugging only and
+            must NOT be used to match anything the app stores. Per-plan lookups
+            key on data-plan-id above, which is numeric on both sides.
+          {%- endcomment -%}
           data-group-id="{{ group.id }}"
         >
           <input

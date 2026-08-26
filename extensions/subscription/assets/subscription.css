@@ -37,6 +37,20 @@ fieldset[data-type="selling_plan"],
   font-family: inherit;
 }
 
+/*
+ * Held back until the app confirms which selling plans it still tracks.
+ *
+ * Liquid renders every group Shopify has attached to the product, including ones
+ * whose local record is gone; revealing first and hiding after would flash a plan
+ * that is about to disappear. The class is added by subscription.js at execution
+ * time and removed as soon as any answer arrives — including every failure, so a
+ * shop whose app is unreachable is never left without its widget. If the script
+ * does not run at all the class is never added and this rule never applies.
+ */
+html.sub-plans-pending .sub-widget {
+  display: none !important;
+}
+
 .sub-widget__label {
   font-size: 11px;
   font-weight: 700;
