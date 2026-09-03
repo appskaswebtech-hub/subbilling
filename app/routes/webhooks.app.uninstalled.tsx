@@ -55,6 +55,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         db.subscription.deleteMany({ where: { shop } }),
         db.sellingPlanGroup.deleteMany({ where: { shop } }),
         db.appSettings.deleteMany({ where: { shop } }),
+        db.commissionCharge.deleteMany({ where: { shop } }),
         db.shopPlan.deleteMany({ where: { shop } }),
         // Session last — matches Shopify's default behaviour
         db.session.deleteMany({ where: { shop } }),

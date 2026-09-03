@@ -11,8 +11,9 @@ import { useState, useEffect } from "react";
 import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar }          from "@shopify/app-bridge-react";
 import { authenticate }      from "../shopify.server";
-import { PLANS, PLAN_KEYS }  from "../config/plans";
+import { PLANS, PLAN_KEYS, PLAN_ORDER } from "../config/plans";
 import { getShopPlanFromDB } from "../utils/planUtils";
+import { getCommissionSummary } from "../lib/app-commission.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -34,7 +35,16 @@ const T = {
 };
 
 // ─── Types ────────────────────────────────────────────────────
-interface LoaderData { currentPlan: string }
+interface CommissionData {
+  charged:    number;   // month-to-date, USD
+  count:      number;   // how many charges it came from
+  cap:        number;   // the approved monthly ceiling
+  capReached: boolean;  // Shopify has refused a usage record for hitting it
+}
+interface LoaderData {
+  currentPlan: string;
+  commission:  CommissionData | null;   // null on flat-fee plans
+}
 interface ActionData { confirmationUrl?: string; error?: string }
 interface UserError  { field: string; message: string }
 interface AppSubscriptionCreateResponse {
@@ -47,10 +57,11 @@ interface AppSubscriptionCreateResponse {
   };
 }
 
-const PLANS_ORDERED = ["basic", "pro", "advanced"].map((k) => PLANS[k]).filter(Boolean);
+const PLANS_ORDERED = PLAN_ORDER.map((k) => PLANS[k]).filter(Boolean);
 
-// All plans share one trial length, so the page-level copy reads it from config
-// rather than hardcoding a number that can drift away from PLANS.
+// All PAID plans share one trial length, so the page-level copy reads it from
+// config rather than hardcoding a number that can drift away from PLANS. Free
+// has no trial (trialDays: 0) — there is no monthly fee to defer.
 const TRIAL_DAYS = PLANS.basic.trialDays;
 
 // ─── Shopify charge mode ──────────────────────────────────────
@@ -73,7 +84,18 @@ const BILLING_TEST_MODE = true;
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const record      = await getShopPlanFromDB(session.shop);
-  return { currentPlan: record.plan } satisfies LoaderData;
+  const planMeta    = PLANS[record.plan];
+
+  // Only commission-priced plans have anything to report — skip the query
+  // entirely on flat-fee tiers.
+  const commission: CommissionData | null = planMeta?.commissionRate
+    ? {
+        ...(await getCommissionSummary(session.shop)),
+        cap: planMeta.usageCappedAmount ?? 0,
+      }
+    : null;
+
+  return { currentPlan: record.plan, commission } satisfies LoaderData;
 };
 
 // ─── Action ───────────────────────────────────────────────────
@@ -87,6 +109,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { error: `Invalid plan: "${planKey}"` } satisfies ActionData;
 
   const selectedPlan = PLANS[planKey];
+
+  // A plan contributes a recurring line, a usage line, or both. The Free plan
+  // is usage-only: no recurring line at all, so the merchant's Shopify bill
+  // stays at $0 until a subscription actually charges.
+  const lineItems: Record<string, unknown>[] = [];
+
+  if (selectedPlan.price > 0) {
+    lineItems.push({
+      plan: {
+        appRecurringPricingDetails: {
+          price:    { amount: selectedPlan.price, currencyCode: "USD" },
+          interval: "EVERY_30_DAYS",
+        },
+      },
+    });
+  }
+
+  if (selectedPlan.commissionRate) {
+    // `terms` is shown verbatim to the merchant on the approval screen, and
+    // `cappedAmount` is required by Shopify — usage pricing cannot be uncapped.
+    lineItems.push({
+      plan: {
+        appUsagePricingDetails: {
+          terms:        selectedPlan.usageTerms ?? "Commission on each successful subscription charge",
+          cappedAmount: { amount: selectedPlan.usageCappedAmount ?? 0, currencyCode: "USD" },
+        },
+      },
+    });
+  }
+
+  if (!lineItems.length)
+    return { error: `Plan "${planKey}" has no price and no commission configured.` } satisfies ActionData;
 
   try {
     const response = await admin.graphql(
@@ -110,14 +164,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           returnUrl: `https://${shop}/admin/apps/${process.env.SHOPIFY_API_KEY}/app/billing-return`,
           trialDays: selectedPlan.trialDays,
           test:     BILLING_TEST_MODE,
-          lineItems: [{
-            plan: {
-              appRecurringPricingDetails: {
-                price:    { amount: selectedPlan.price, currencyCode: "USD" },
-                interval: "EVERY_30_DAYS",
-              },
-            },
-          }],
+          lineItems,
         },
       }
     );
@@ -138,23 +185,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // ─── Plan icons ───────────────────────────────────────────────
 const PLAN_ICONS: Record<string, { icon: string; bg: string; fg: string }> = {
+  free:     { icon: "◇", bg: T.greenBg,  fg: T.greenFg  },
   basic:    { icon: "△", bg: T.purpleBg, fg: T.purpleFg },
   pro:      { icon: "★", bg: T.purpleBg, fg: T.purpleFg },
   advanced: { icon: "✓", bg: T.greenBg,  fg: T.greenFg  },
 };
 
-// ─── Feature comparison matrix (basic / pro / advanced) ───────
+// ─── Feature comparison matrix (free / basic / pro / advanced) ─
 const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
-  { label: "Subscription plans",    values: { basic: "Up to 5",   pro: "Up to 10",  advanced: "Unlimited" } },
-  { label: "Subscription products", values: { basic: "Up to 50",  pro: "Up to 500", advanced: "Unlimited" } },
-  { label: "Billing intervals",     values: { basic: "Weekly, Monthly, Yearly", pro: "Weekly, Monthly, Yearly", advanced: "Weekly, Monthly, Yearly" } },
-  { label: "Support",               values: { basic: "Email",     pro: "Priority",  advanced: "Priority"  } },
-  { label: "API & Webhook access",  values: { basic: "—",         pro: "—",         advanced: "✓"         } },
+  { label: "Monthly fee",           values: { free: "$0",        basic: "$9.99",   pro: "$14.99",    advanced: "$19.99"    } },
+  { label: "Transaction fee",       values: { free: "2% per charge", basic: "—",   pro: "—",         advanced: "—"         } },
+  { label: "Subscription plans",    values: { free: "Up to 5",   basic: "Up to 5", pro: "Up to 10",  advanced: "Unlimited" } },
+  { label: "Subscription products", values: { free: "Up to 50",  basic: "Up to 50", pro: "Up to 500", advanced: "Unlimited" } },
+  { label: "Billing intervals",     values: { free: "Weekly, Monthly, Yearly", basic: "Weekly, Monthly, Yearly", pro: "Weekly, Monthly, Yearly", advanced: "Weekly, Monthly, Yearly" } },
+  { label: "Support",               values: { free: "Email",     basic: "Email",   pro: "Priority",  advanced: "Priority"  } },
+  { label: "Loyalty discounts",     values: { free: "—",         basic: "—",       pro: "✓",         advanced: "✓"         } },
+  { label: "API & Webhook access",  values: { free: "—",         basic: "—",       pro: "—",         advanced: "✓"         } },
 ];
 
 // ─── Page ─────────────────────────────────────────────────────
 export default function BillingPage() {
-  const { currentPlan } = useLoaderData<typeof loader>();
+  const { currentPlan, commission } = useLoaderData<typeof loader>();
   const actionData      = useActionData<typeof action>() as ActionData | undefined;
   const navigation      = useNavigation();
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
@@ -206,7 +257,9 @@ export default function BillingPage() {
             <div className="varient-section">
               <Text as="h1" variant="headingXl" fontWeight="bold">Choose your plan</Text>
               <Text as="p" variant="bodySm" tone="subdued">
-                Pick the plan that best fits your store's needs. All plans include a{" "}
+                Pick the plan that best fits your store's needs. Start free and pay{" "}
+                <span style={{ color: T.purpleFg, fontWeight: 500 }}>2% per subscription charge</span>,
+                or choose a monthly plan with a{" "}
                 <span style={{ color: T.purpleFg, fontWeight: 500 }}>{TRIAL_DAYS}-day free trial</span>.
               </Text>
             </div>
@@ -246,13 +299,66 @@ export default function BillingPage() {
             <Text as="p" variant="bodySm" tone="subdued">
               {currentPlan === "advanced"
                 ? "You have access to all features. Manage your plan below."
+                : currentPlan === "free"
+                ? "No monthly fee — you're charged 2% each time a subscription bills. Switch to a paid plan anytime to remove the commission."
                 : "Upgrade anytime to unlock more features for your store."}
             </Text>
           </div>
         </div>
 
+        {/* ── Commission usage (free plan only) ────────────────── */}
+        {commission && (
+          <div
+            className="hover-card"
+            style={{
+              background:   commission.capReached ? T.amberBg : "var(--p-color-bg-surface)",
+              border:       `0.5px solid ${commission.capReached ? "#E0B15E" : "var(--p-color-border)"}`,
+              borderRadius: "12px",
+              padding:      "16px 20px",
+            }}
+          >
+            <BlockStack gap="200">
+              <InlineStack align="space-between" blockAlign="center">
+                <Text as="p" variant="bodySm" fontWeight="semibold">
+                  Commission this month
+                </Text>
+                <Text as="span" variant="bodySm" tone="subdued">
+                  {commission.count} charge{commission.count === 1 ? "" : "s"}
+                </Text>
+              </InlineStack>
+
+              <InlineStack gap="150" blockAlign="baseline">
+                <span style={{ fontSize: "26px", fontWeight: 700, lineHeight: 1 }}>
+                  {displayPrice(commission.charged)}
+                </span>
+                <Text as="span" variant="bodySm" tone="subdued">
+                  of {displayPrice(commission.cap)} monthly cap
+                </Text>
+              </InlineStack>
+
+              {/* Usage bar */}
+              <div style={{ height: "6px", borderRadius: "4px", background: "var(--p-color-bg-surface-secondary)", overflow: "hidden" }}>
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${Math.min(100, commission.cap > 0 ? (commission.charged / commission.cap) * 100 : 0)}%`,
+                    background: commission.capReached ? T.amberFg : T.purple,
+                    borderRadius: "4px",
+                  }}
+                />
+              </div>
+
+              <Text as="p" variant="bodySm" tone="subdued">
+                {commission.capReached
+                  ? "⚠️ You've reached your monthly cap — no further commission can be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally."
+                  : "Charged automatically each time one of your subscriptions bills successfully."}
+              </Text>
+            </BlockStack>
+          </div>
+        )}
+
         {/* ── Plan cards ───────────────────────────────────────── */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "16px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${PLANS_ORDERED.length}, 1fr)`, gap: "16px" }}>
           {PLANS_ORDERED.map((plan) => {
             const isCurrent = currentPlan === plan.key;
             const meta      = PLAN_ICONS[plan.key] ?? PLAN_ICONS.basic;
@@ -310,10 +416,12 @@ export default function BillingPage() {
                   {/* Price */}
                   <div style={{ marginTop: "8px" }}>
                     <span style={{ fontSize: "32px", fontWeight: 700, lineHeight: 1 }}>
-                      {displayPrice(plan.price)}
+                      {plan.price > 0 ? displayPrice(plan.price) : "Free"}
                     </span>
                     <div style={{ fontSize: "12px", color: "var(--p-color-text-subdued)", marginTop: "2px" }}>
-                      per month · {plan.trialDays}-day free trial
+                      {plan.commissionRate
+                        ? `+ ${Math.round(plan.commissionRate * 100)}% per subscription charge`
+                        : `per month · ${plan.trialDays}-day free trial`}
                     </div>
                   </div>
 
@@ -373,6 +481,11 @@ export default function BillingPage() {
                       >
                         {isSubmitting && submittingPlan === plan.key
                           ? "Processing…"
+                          : plan.price === 0
+                          // "Upgrade to Free" reads wrong from the no-plan state,
+                          // and "Downgrade" is not what a merchant moving to a
+                          // commission model is doing either.
+                          ? `Start with ${plan.label}`
                           : currentPlanPrice > plan.price
                           ? `Downgrade to ${plan.label}`
                           : `Upgrade to ${plan.label}`}
@@ -397,7 +510,7 @@ export default function BillingPage() {
             <span style={{ fontSize: "14px" }}>⊞</span>
             <Text as="span" variant="bodySm" fontWeight="semibold">All plans include</Text>
           </div>
-          {[`${TRIAL_DAYS}-day free trial`, "Cancel anytime", "No setup fees", "Secure & reliable"].map((item) => (
+          {["Cancel anytime", "No setup fees", "Secure & reliable", "No long-term contract"].map((item) => (
             <div key={item} style={{ display: "flex", alignItems: "center", gap: "5px" }}>
               <span style={{ color: T.greenDot, fontWeight: 700, fontSize: "12px" }}>✓</span>
               <Text as="span" variant="bodySm" tone="subdued">{item}</Text>
@@ -407,7 +520,7 @@ export default function BillingPage() {
 
         {/* Footer note */}
         <Text as="p" alignment="center" variant="bodySm" tone="subdued">
-          ⊞ All plans include a {TRIAL_DAYS}-day free trial. Cancel anytime from your Shopify admin. Billed in USD.
+          ⊞ Paid plans include a {TRIAL_DAYS}-day free trial. Cancel anytime from your Shopify admin. Billed in USD.
         </Text>
 
       </BlockStack>
@@ -455,7 +568,7 @@ export default function BillingPage() {
                     <th style={{ textAlign: "left", padding: "14px 12px", fontSize: "12px", color: "var(--p-color-text-subdued)", fontWeight: 600, borderBottom: "1px solid var(--p-color-border)" }}>
                       Feature
                     </th>
-                    {PLAN_KEYS.map((key) => {
+                    {PLAN_ORDER.map((key) => {
                       const plan = PLANS[key];
                       const isCurrent = key === currentPlan;
                       return (
@@ -470,7 +583,7 @@ export default function BillingPage() {
                             {plan.label}
                           </div>
                           <div style={{ fontSize: "12px", color: "var(--p-color-text-subdued)", marginTop: "2px" }}>
-                            {displayPrice(plan.price)}/mo
+                            {plan.price > 0 ? `${displayPrice(plan.price)}/mo` : "Free"}
                           </div>
                           {isCurrent && (
                             <span style={{ display: "inline-block", marginTop: "4px", fontSize: "10px", fontWeight: 600, color: T.greenFg, background: T.greenBg, borderRadius: "10px", padding: "1px 8px" }}>
@@ -493,7 +606,7 @@ export default function BillingPage() {
                       <td style={{ padding: "12px", fontSize: "13px", color: "var(--p-color-text)", borderBottom: "0.5px solid var(--p-color-border-secondary)", whiteSpace: "nowrap" }}>
                         {row.label}
                       </td>
-                      {PLAN_KEYS.map((key) => {
+                      {PLAN_ORDER.map((key) => {
                         const val = row.values[key] ?? "—";
                         return (
                           <td key={key} style={{

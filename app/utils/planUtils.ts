@@ -21,9 +21,13 @@ export async function getShopPlanFromDB(shop: string) {
 }
 
 export async function updateShopPlan(
-  shop:           string,
-  plan:           string,
-  subscriptionId: string | null
+  shop:            string,
+  plan:            string,
+  subscriptionId:  string | null,
+  // GID of the usage-priced AppSubscriptionLineItem, when the plan has one.
+  // appUsageRecordCreate needs this specific id — the AppSubscription GID in
+  // `subscriptionId` is rejected. Null for flat-fee plans.
+  usageLineItemId: string | null = null
 ) {
   const now = new Date();
 
@@ -32,6 +36,7 @@ export async function updateShopPlan(
     update: {
       plan,
       subscriptionId,
+      usageLineItemId,
       status:           "active",
       billingStartedAt: subscriptionId ? now : null,  // only set when paid
     },
@@ -39,6 +44,7 @@ export async function updateShopPlan(
       shop,
       plan,
       subscriptionId,
+      usageLineItemId,
       status:           "active",
       billingStartedAt: subscriptionId ? now : null,
     },
@@ -51,6 +57,7 @@ export async function cancelShopPlan(shop: string) {
     data: {
       plan:            "none",
       subscriptionId:  null,
+      usageLineItemId: null,
       status:          "cancelled",
       billingStartedAt: null,
     },

@@ -4,6 +4,7 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { chargeCommission } from "../lib/app-commission.server";
 import {
   SUBSCRIPTION_CONTRACT_QUERY,
   advanceBillingDate,
@@ -84,12 +85,26 @@ export async function action({ request }: ActionFunctionArgs) {
       });
 
       if (!existingAttempt) {
-        await prisma.billingAttempt.create({
+        const initialAttempt = await prisma.billingAttempt.create({
           data: {
             subscriptionId: localSubId,
             amount:         parseFloat(priceAmount),
             status:         "SUCCESS",
           },
+        });
+
+        // The checkout order IS a completed subscription charge, and Shopify
+        // does not fire subscription_billing_attempts/success for it — this
+        // synthesized attempt is its only record, so commission is taken here.
+        // No order GID on this payload, so the base falls back to the stored
+        // per-unit price.
+        await chargeCommission({
+          shop,
+          admin,
+          subscription:     { id: localSubId, shop, price: parseFloat(priceAmount), shopifyContractId: contractId },
+          billingAttemptId: initialAttempt.id,
+          contractGid:      contractId,
+          orderGid:         null,
         });
       }
 
@@ -159,16 +174,34 @@ export async function action({ request }: ActionFunctionArgs) {
         orderBy: { createdAt: "desc" },
       });
 
+      // Keep the attempt id from whichever branch ran — it is the commission's
+      // idempotency key, so a webhook retry must resolve to the same value.
+      let attemptId: string;
+
       if (pending) {
         await prisma.billingAttempt.update({
           where: { id: pending.id },
           data:  { status: "SUCCESS" },
         });
+        attemptId = pending.id;
       } else {
-        await prisma.billingAttempt.create({
+        const created = await prisma.billingAttempt.create({
           data: { subscriptionId: sub.id, amount: sub.price, status: "SUCCESS" },
         });
+        attemptId = created.id;
       }
+
+      // ── App commission ────────────────────────────────────────
+      // Charged before the date reconciliation below so a Shopify hiccup there
+      // cannot skip it. No-ops unless the shop is on a commission-priced plan.
+      await chargeCommission({
+        shop,
+        admin,
+        subscription:     sub,
+        billingAttemptId: attemptId,
+        contractGid:      contractId,
+        orderGid:         (p.admin_graphql_api_order_id as string | undefined) ?? null,
+      });
 
       // ── Smart nextBillingDate update ──────────────────────────
       // The cron ALREADY advanced nextBillingDate before triggering the billing attempt.

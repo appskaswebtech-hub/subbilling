@@ -155,18 +155,25 @@ function ColorSwatch({
   );
 }
 
-type ShopTier = "free" | "basic" | "pro" | "advanced";
+// "none" is the sentinel written on install and on a declined approval — a shop
+// that has not chosen any plan yet. It is deliberately NOT "free": Free is a
+// real, merchant-approved plan with Basic-equivalent limits.
+type ShopTier = "none" | "free" | "basic" | "pro" | "advanced";
 
 // ─── Plan tier limits ─────────────────────────────────────────
 // NOTE: -1 means unlimited. We avoid Infinity because JSON.stringify(Infinity) === "null"
 const PLAN_LIMITS: Record<ShopTier, number> = {
-  free: 1,
+  none: 1,      // no plan chosen — the app.tsx gate popup is also showing
+  free: 5,      // matches basic — the free tier is monetized by commission, not by gating
   basic: 5,
   pro: 10,
   advanced: -1, // -1 = unlimited
 };
 
 const PLAN_LABELS: Record<ShopTier, string> = {
+  // Reads as "Your current plan allows up to 1…". Not "Free" — the real Free
+  // plan allows 5, so that label would contradict the number beside it.
+  none: "current",
   free: "Free",
   basic: "Basic",
   pro: "Pro",
@@ -502,7 +509,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const shopPlan = await prisma.shopPlan.findUnique({
     where: { shop: session.shop },
   });
-  const tier = (shopPlan?.plan ?? "free") as ShopTier;
+  // "none", not "free" — "free" is a real plan with Basic-equivalent limits, so
+  // defaulting to it would hand an un-approved shop 5 selling plans. Unknown
+  // tiers fall through getPlanLimit's `?? 1`.
+  const tier = (shopPlan?.plan ?? "none") as ShopTier;
   const planLimit = getPlanLimit(tier); // -1 means unlimited
 
   const localGroups = await prisma.sellingPlanGroup.findMany({
@@ -670,7 +680,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const shopPlan = await prisma.shopPlan.findUnique({
       where: { shop: session.shop },
     });
-    const tier = shopPlan?.plan ?? "free";
+    // See the loader — "none" keeps an un-approved shop at the fallback of 1.
+    const tier = shopPlan?.plan ?? "none";
     const limit = getPlanLimit(tier);
     const unlimited = isUnlimitedLimit(limit);
 

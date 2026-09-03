@@ -9,17 +9,22 @@ import polarisStyles   from "@shopify/polaris/build/esm/styles.css?url";
 import { Text, List }  from "@shopify/polaris";
 import { authenticate }      from "../shopify.server";
 import { getShopPlanFromDB } from "../utils/planUtils";
+import { PLANS, PLAN_ORDER } from "../config/plans";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
-const PAID_PLANS     = ["basic", "pro", "advanced"];
+// Every plan in the catalog counts as chosen, "free" included — it is a real
+// approved Shopify subscription, just a usage-priced one. Only the "none"
+// sentinel written on install (planUtils) or a declined approval falls through
+// to the gate.
+const ACTIVE_PLANS   = PLAN_ORDER;
 const NO_POPUP_PATHS = ["/app/billing", "/app/billing-return"];
 
 // ─── LOADER ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const record      = await getShopPlanFromDB(session.shop);
-  const hasPlan     = PAID_PLANS.includes(record.plan);
+  const hasPlan     = ACTIVE_PLANS.includes(record.plan);
 
   return {
     apiKey:   process.env.SHOPIFY_API_KEY || "",
@@ -32,47 +37,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 function PlanGatePopup() {
   const navigate = useNavigate();
 
-  const plans = [
-    {
-      key:     "basic",
-      label:   "Basic",
-      price:   9.99,
-      color:   "#f6f6f7",
-      popular: false,
-      features: [
-        "Up to 50 Subscription Products",
-        "Up to 5 Subscription Plans",
-        "Weekly, Monthly & Yearly Billing",
-        "Email Support",
-      ],
-    },
-    {
-      key:     "pro",
-      label:   "Pro",
-      price:   14.99,
-      color:   "#f0f4ff",
-      popular: true,
-      features: [
-        "Up to 500 Subscription Products",
-        "Up to 10 Subscription Plans",
-        "Weekly, Monthly & Yearly Billing",
-        "Priority Support",
-      ],
-    },
-    {
-      key:     "advanced",
-      label:   "Advanced",
-      price:   19.99,
-      color:   "#f3f0ff",
-      popular: false,
-      features: [
-        "Unlimited Everything",
-        "Unlimited Subscription Products",
-        "API & Webhook Access",
-        "Weekly, Monthly & Yearly Billing",
-      ],
-    },
-  ];
+  // Read from the shared catalog rather than a local copy — this list had
+  // already drifted from app/config/plans.ts (prices and feature wording), and
+  // a second copy would have to be hand-edited every time a tier changes.
+  const plans = PLAN_ORDER.map((k) => PLANS[k]).filter(Boolean);
 
   return (
     // Single wrapper — handles both backdrop and centering
@@ -139,7 +107,7 @@ function PlanGatePopup() {
         <div
           style={{
             display:             "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
+            gridTemplateColumns: `repeat(${plans.length}, 1fr)`,
             borderTop:           "1px solid #e1e3e5",
           }}
         >
@@ -189,10 +157,12 @@ function PlanGatePopup() {
                 </Text>
                 <div style={{ marginTop: "8px" }}>
                   <Text as="p" variant="heading2xl" fontWeight="bold">
-                    ${plan.price}
+                    {plan.price > 0 ? `$${plan.price}` : "Free"}
                   </Text>
                   <Text as="p" variant="bodySm" tone="subdued">
-                    / month
+                    {plan.commissionRate
+                      ? `${Math.round(plan.commissionRate * 100)}% per charge`
+                      : "/ month"}
                   </Text>
                 </div>
               </div>

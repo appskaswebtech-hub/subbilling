@@ -151,8 +151,12 @@ model AppSettings {
 model ShopPlan {
   id               Int       @id @default(autoincrement())
   shop             String    @unique
-  plan             String    @default("free")   // "basic" | "pro" | "advanced"
+  plan             String    @default("free")   // "free" | "basic" | "pro" | "advanced"
   subscriptionId   String?                       // Shopify AppSubscription GID
+  // AppSubscriptionLineItem GID of the usage-priced line. Required by
+  // appUsageRecordCreate — the AppSubscription GID in `subscriptionId` is NOT
+  // accepted there. Null on flat-fee plans, which have no usage line item.
+  usageLineItemId  String?
   status           String    @default("active")  // "active" | "cancelled" | "expired"
   trialEndsAt      DateTime?
   billingStartedAt DateTime?
@@ -160,6 +164,30 @@ model ShopPlan {
   updatedAt        DateTime  @updatedAt
 
   @@index([shop])
+}
+
+// ─── Commission ledger ────────────────────────────────────────────────────────
+// One row per successful subscription charge on a commission-priced plan.
+// Doubles as the audit trail shown to the merchant and as the idempotency guard.
+model CommissionCharge {
+  id               String   @id @default(cuid())
+  shop             String
+  // The local BillingAttempt that earned this commission. UNIQUE — this is the
+  // idempotency guard: Shopify retries webhooks, and the success handler is not
+  // otherwise re-entrant.
+  billingAttemptId String   @unique
+  contractId       String                        // Shopify subscription contract GID
+  baseAmount       Float                         // order total the rate was applied to
+  rate             Float                         // rate at charge time, so historic rows survive a rate change
+  amount           Float                         // commission actually charged
+  currency         String   @default("USD")
+  status           String   @default("CHARGED")  // "CHARGED" | "SKIPPED" | "FAILED"
+  reason           String?                       // "capped" | "no-usage-line" | API error text
+  usageRecordId    String?                       // Shopify AppUsageRecord GID
+  createdAt        DateTime @default(now())
+
+  @@index([shop])
+  @@index([shop, createdAt])
 }
 
 // ─── Public API Key ───────────────────────────────────────────────────────────

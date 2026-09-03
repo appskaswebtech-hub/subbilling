@@ -19,10 +19,16 @@ import { PLANS }        from "../config/plans";
 import { updateShopPlan } from "../utils/planUtils";
 
 // ─── Types ────────────────────────────────────────────────────
+interface AppSubscriptionLineItem {
+  id:   string;
+  plan: { pricingDetails?: { __typename?: string } };
+}
+
 interface ActiveSubscription {
-  id:     string;
-  name:   string;
-  status: "ACTIVE" | "PENDING" | "EXPIRED" | "DECLINED" | "FROZEN" | "CANCELLED";
+  id:        string;
+  name:      string;
+  status:    "ACTIVE" | "PENDING" | "EXPIRED" | "DECLINED" | "FROZEN" | "CANCELLED";
+  lineItems: AppSubscriptionLineItem[];
 }
 
 interface ActiveSubscriptionResponse {
@@ -39,6 +45,9 @@ interface LoaderData {
 }
 
 // ─── GraphQL ──────────────────────────────────────────────────
+// lineItems is selected because appUsageRecordCreate needs the usage LINE
+// ITEM's GID — the AppSubscription GID is rejected there — and this is the only
+// point in the flow where the approved subscription is read back.
 const ACTIVE_SUBSCRIPTION_QUERY = `#graphql
   query {
     currentAppInstallation {
@@ -46,6 +55,10 @@ const ACTIVE_SUBSCRIPTION_QUERY = `#graphql
         id
         name
         status
+        lineItems {
+          id
+          plan { pricingDetails { __typename } }
+        }
       }
     }
   }
@@ -74,9 +87,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const planKey  = activeSub.name.toLowerCase();
       const planMeta = PLANS[planKey];
 
-      await updateShopPlan(shop, planKey, activeSub.id);
+      // Commission is billed against this line item on every successful
+      // subscription charge. Without it the shop is on a commission plan we
+      // cannot invoice, so log loudly rather than failing silently.
+      const usageLineItemId =
+        activeSub.lineItems?.find(
+          (li) => li.plan?.pricingDetails?.__typename === "AppUsagePricing"
+        )?.id ?? null;
 
-      console.log(`[billing-return] ✅ Plan updated → ${planKey} for ${shop}`);
+      if (planMeta?.commissionRate && !usageLineItemId) {
+        console.error(
+          `[billing-return] ⚠️ ${shop} approved "${planKey}" but no AppUsagePricing line item came back — commission cannot be charged.`
+        );
+      }
+
+      await updateShopPlan(shop, planKey, activeSub.id, usageLineItemId);
+
+      console.log(
+        `[billing-return] ✅ Plan updated → ${planKey} for ${shop}` +
+        (usageLineItemId ? ` (usage line ${usageLineItemId})` : "")
+      );
 
       return {
         ok:   true,
@@ -84,9 +114,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       } satisfies LoaderData;
     }
 
-    // No active subscription found — merchant likely cancelled
+    // No active subscription found — merchant likely cancelled.
+    // "none" (not "free") is the no-plan sentinel: "free" is a real plan now,
+    // and writing it here would grant the tier to a merchant who declined.
     console.warn(`[billing-return] ⚠️ No ACTIVE subscription found for ${shop}.`);
-    await updateShopPlan(shop, "free", null);
+    await updateShopPlan(shop, "none", null);
 
     return { ok: false, plan: null } satisfies LoaderData;
 
