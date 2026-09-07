@@ -14,7 +14,8 @@
 // with status FAILED — it is not an outage for the merchant.
 
 import db          from "../db.server";
-import { PLANS, calcCommission } from "../config/plans";
+import { PLANS, calcCommission, APP_BILLING_CURRENCY } from "../config/plans";
+import { convert } from "../config/currency";
 
 // The subset of the Prisma Subscription row this module needs. Declared
 // structurally so callers can pass the full record without a cast.
@@ -44,6 +45,13 @@ interface ChargeCommissionArgs {
    * for a checkout order, which falls back to the stored price.
    */
   orderGid:         string | null;
+  /**
+   * Currency of `subscription.price`, for the fallback path only — the order
+   * lookup carries its own. The local Subscription row has no currency column,
+   * so callers that know it (the contract webhook has `contract.currencyCode`)
+   * must pass it or the charge is skipped as unverifiable.
+   */
+  baseCurrency?:    string | null;
 }
 
 const ORDER_TOTAL_QUERY = `#graphql
@@ -65,14 +73,18 @@ type LedgerWrite = {
   baseAmount:       number;
   rate:             number;
   amount:           number;
-  currency?:        string;
+  /** Currency of `baseAmount`. Null when we could not establish it. */
+  currency?:        string | null;
   status:           "CHARGED" | "SKIPPED" | "FAILED";
   reason?:          string | null;
   usageRecordId?:   string | null;
 };
 
-function recordCharge({ billingAttemptId, ...rest }: LedgerWrite) {
-  const data = { billingAttemptId, ...rest };
+function recordCharge({ billingAttemptId, currency, ...rest }: LedgerWrite) {
+  // The column is non-nullable, and defaulting an unknown currency to USD is
+  // exactly the mislabelling this module now guards against — so an
+  // unestablished currency is recorded as such rather than guessed.
+  const data = { billingAttemptId, ...rest, currency: currency ?? "UNKNOWN" };
   return db.commissionCharge.upsert({
     where:  { billingAttemptId },
     create: data,
@@ -119,6 +131,7 @@ export async function chargeCommission({
   billingAttemptId,
   contractGid,
   orderGid,
+  baseCurrency = null,
 }: ChargeCommissionArgs): Promise<void> {
   try {
     // ── 1. Does this shop's plan take a commission at all? ──────────
@@ -150,8 +163,11 @@ export async function chargeCommission({
     // (see subscription-sync.server.ts) so it under-reports multi-line and
     // multi-quantity contracts. Prefer the real order total whenever we have
     // an order to ask about.
+    // `currency` starts as whatever the caller could vouch for, NOT "USD".
+    // Defaulting it to USD was the bug this guard exists to prevent: a ₹5,000
+    // order yielded 100, which was then billed as $100 instead of ~$1.20.
     let baseAmount  = subscription.price;
-    let currency    = "USD";
+    let currency    = baseCurrency;
     let orderName   = "";
     let baseSource  = "subscription.price";
 
@@ -167,7 +183,8 @@ export async function chargeCommission({
 
         if (Number.isFinite(total) && total > 0) {
           baseAmount = total;
-          currency   = money?.currencyCode ?? "USD";
+          // shopMoney is denominated in the SHOP's currency, not ours.
+          currency   = money?.currencyCode ?? null;
           orderName  = json?.data?.order?.name ?? "";
           baseSource = "order.totalPriceSet";
         } else {
@@ -178,13 +195,57 @@ export async function chargeCommission({
       }
     }
 
-    const amount = calcCommission(baseAmount, rate);
+    // Reassigned below if the shop's selling and billing currencies differ.
+    let amount = calcCommission(baseAmount, rate);
 
     console.log(
-      `[commission] ${shop} — base ${baseAmount} ${currency} (${baseSource}) × ${rate} → ${amount}`
+      `[commission] ${shop} — base ${baseAmount} ${currency ?? "UNKNOWN"} (${baseSource}) × ${rate} → ${amount}`
     );
 
-    // ── 4. Nothing to charge ────────────────────────────────────────
+    // ── 4. Reconcile the base against the currency we bill in ───────
+    // The usage line was created in the shop's own billing currency, so for
+    // a shop that sells and pays in the same currency — nearly all of them —
+    // `amount` is already correct and nothing below changes it.
+    const billingCurrency = shopPlan.billingCurrency || APP_BILLING_CURRENCY;
+
+    if (currency === null) {
+      // Retryable: the order lookup may have failed transiently, and a later
+      // delivery of the same webhook can still establish the currency.
+      console.error(`[commission] ${shop} — could not establish base currency; not billing`);
+      await recordCharge({
+        shop, billingAttemptId, contractId: contractGid,
+        baseAmount, rate, amount, currency,
+        status: "FAILED", reason: "unknown-currency",
+      });
+      return;
+    }
+
+    // The uncommon case: the shop sells in one currency and pays Shopify in
+    // another. Convert rather than forfeit the commission — the rate is
+    // approximate, but it is applied to a genuine cross-currency conversion
+    // instead of relabelling one currency as another.
+    if (currency !== billingCurrency) {
+      const converted = convert(amount, currency, billingCurrency);
+
+      if (converted === null || converted <= 0) {
+        console.warn(
+          `[commission] ${shop} — no rate to convert ${currency} → ${billingCurrency}; skipping`
+        );
+        await recordCharge({
+          shop, billingAttemptId, contractId: contractGid,
+          baseAmount, rate, amount, currency,
+          status: "SKIPPED", reason: `no-rate:${currency}->${billingCurrency}`,
+        });
+        return;
+      }
+
+      console.log(
+        `[commission] ${shop} — converting ${amount} ${currency} → ${converted} ${billingCurrency}`
+      );
+      amount = converted;
+    }
+
+    // ── 5. Nothing to charge ────────────────────────────────────────
     // A zero base (a 100%-discounted cycle, a free trial line) rounds to 0, and
     // Shopify rejects a 0 usage record. Log it as SKIPPED so the ledger still
     // accounts for every successful cycle.
@@ -197,7 +258,7 @@ export async function chargeCommission({
       return;
     }
 
-    // ── 5. We need the usage line item and an admin client ──────────
+    // ── 6. We need the usage line item and an admin client ──────────
     if (!shopPlan.usageLineItemId) {
       console.error(`[commission] ${shop} is on "${shopPlan.plan}" but has no usageLineItemId — cannot bill`);
       // SKIPPED, not FAILED: retrying will not help. The subscription needs
@@ -221,10 +282,10 @@ export async function chargeCommission({
       return;
     }
 
-    // ── 6. Bill the merchant ────────────────────────────────────────
-    // The app subscription is always priced in USD (see app.billing.tsx), so
-    // the usage record must be too even when the order settled in another
-    // currency. `baseAmount`/`currency` keep the original on record.
+    // ── 7. Bill the merchant ────────────────────────────────────────
+    // `amount` is now guaranteed to be denominated in `billingCurrency`, which
+    // is the currency Shopify created the usage line in — the only currency
+    // appUsageRecordCreate will accept for it.
     const description = orderName
       ? `${Math.round(rate * 100)}% commission on subscription order ${orderName}`
       : `${Math.round(rate * 100)}% commission on subscription charge`;
@@ -232,7 +293,7 @@ export async function chargeCommission({
     const res = await admin.graphql(USAGE_RECORD_CREATE, {
       variables: {
         subscriptionLineItemId: shopPlan.usageLineItemId,
-        price:                  { amount, currencyCode: "USD" },
+        price:                  { amount, currencyCode: billingCurrency },
         description,
         idempotencyKey:         billingAttemptId,
       },
@@ -272,11 +333,13 @@ export async function chargeCommission({
 
     await recordCharge({
       shop, billingAttemptId, contractId: contractGid,
-      baseAmount, rate, amount, currency,
+      // `currency` describes `amount` — what was actually billed — so a
+      // cross-currency charge records the billing currency, not the order's.
+      baseAmount, rate, amount, currency: billingCurrency,
       status: "CHARGED", usageRecordId: recordId,
     });
 
-    console.log(`[commission] ✅ charged ${amount} USD to ${shop} (usage record ${recordId})`);
+    console.log(`[commission] ✅ charged ${amount} ${billingCurrency} to ${shop} (usage record ${recordId})`);
 
   } catch (err) {
     // Last resort. The merchant's subscription billing has already succeeded
@@ -312,11 +375,25 @@ export async function getCommissionSummary(shop: string) {
     select: { amount: true, status: true, reason: true },
   });
 
+  // Only CHARGED rows carry an amount in the shop's billing currency; a
+  // SKIPPED row's amount may be in the order's, so it must never be summed in.
+  const charged = rows.filter((r) => r.status === "CHARGED");
+
+  // The subscription's currency is fixed at approval, so every CHARGED row for
+  // this shop shares it — read it from the plan rather than from the rows.
+  const shopPlan = await db.shopPlan.findUnique({ where: { shop } });
+
   return {
-    charged:   rows.filter((r) => r.status === "CHARGED").reduce((sum, r) => sum + r.amount, 0),
-    count:     rows.filter((r) => r.status === "CHARGED").length,
+    charged:   charged.reduce((sum, r) => sum + r.amount, 0),
+    count:     charged.length,
+    currency:  shopPlan?.billingCurrency || APP_BILLING_CURRENCY,
     // True once Shopify has refused a usage record for hitting the monthly cap:
     // the merchant is now getting the app for free and needs to re-approve.
     capReached: rows.some((r) => r.status === "SKIPPED" && r.reason === "capped"),
+    // Set when a charge could not be converted into the billing currency.
+    // Silent revenue loss otherwise — surface it.
+    unconvertible:
+      rows.find((r) => r.status === "SKIPPED" && r.reason?.startsWith("no-rate:"))
+        ?.reason?.slice("no-rate:".length) ?? null,
   };
 }

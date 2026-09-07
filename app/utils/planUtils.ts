@@ -27,7 +27,11 @@ export async function updateShopPlan(
   // GID of the usage-priced AppSubscriptionLineItem, when the plan has one.
   // appUsageRecordCreate needs this specific id — the AppSubscription GID in
   // `subscriptionId` is rejected. Null for flat-fee plans.
-  usageLineItemId: string | null = null
+  usageLineItemId: string | null = null,
+  // Currency the AppSubscription was created in. Shopify fixes it at approval
+  // and appUsageRecordCreate rejects anything else, so it is stored alongside
+  // the line item it applies to.
+  billingCurrency: string = "USD"
 ) {
   const now = new Date();
 
@@ -37,6 +41,7 @@ export async function updateShopPlan(
       plan,
       subscriptionId,
       usageLineItemId,
+      billingCurrency,
       status:           "active",
       billingStartedAt: subscriptionId ? now : null,  // only set when paid
     },
@@ -45,6 +50,7 @@ export async function updateShopPlan(
       plan,
       subscriptionId,
       usageLineItemId,
+      billingCurrency,
       status:           "active",
       billingStartedAt: subscriptionId ? now : null,
     },

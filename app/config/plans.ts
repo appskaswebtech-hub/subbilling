@@ -21,6 +21,10 @@ export interface Plan {
   commissionRate?:    number;  // 0.02 = 2% of each successful subscription charge
   usageCappedAmount?: number;  // monthly ceiling, in USD
   usageTerms?:        string;  // shown verbatim on the merchant approval screen
+
+  // Which support queue the tier buys. Declared explicitly rather than parsed
+  // out of `features` — that copy is marketing text and is free to be reworded.
+  supportTier: "email" | "priority";
 }
 
 export const PLANS: Record<string, Plan> = {
@@ -40,6 +44,7 @@ export const PLANS: Record<string, Plan> = {
     usageCappedAmount: 50,
     usageTerms:        "2% commission on each successful subscription charge",
 
+    supportTier: "email",
     features: [
       "No monthly fee — 2% per subscription charge",
       "Up to 5 Subscription Plans",
@@ -55,6 +60,7 @@ export const PLANS: Record<string, Plan> = {
     trialDays: 7,
     color:     "#f6f6f7",
     popular:   false,
+    supportTier: "email",
     features: [
       "Up to 5 Subscription Plans",
       "Weekly, Monthly and Yearly Billing",
@@ -69,6 +75,7 @@ export const PLANS: Record<string, Plan> = {
     trialDays: 7,
     color:     "#f0f4ff",
     popular:   true,
+    supportTier: "priority",
     features: [
       "Up to 10 Subscription Plans",
       "Up to 500 Subscription Products",
@@ -83,6 +90,7 @@ export const PLANS: Record<string, Plan> = {
     trialDays: 7,
     color:     "#f3f0ff",
     popular:   false,
+    supportTier: "priority",
     features: [
       "Unlimited Everything",
       "Unlimited Subscription Products",
@@ -91,6 +99,19 @@ export const PLANS: Record<string, Plan> = {
     ],
   },
 };
+
+/**
+ * The currency every app charge is created in.
+ *
+ * Every money number in this file — `price` and `usageCappedAmount` — is
+ * denominated in it. Shopify does support billing merchants in their local
+ * currency (query `shopBillingPreferences.currency`), but switching to that
+ * needs a per-currency price table: sending 9.99 with currencyCode "INR" bills
+ * ₹9.99, not the intended ~₹830. Until that table exists this stays USD, and
+ * app-commission.server.ts refuses to bill an order denominated in anything
+ * else rather than silently relabelling the number.
+ */
+export const APP_BILLING_CURRENCY = "USD";
 
 export const PLAN_KEYS = Object.keys(PLANS);
 

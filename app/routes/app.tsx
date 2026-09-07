@@ -18,7 +18,9 @@ export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 // sentinel written on install (planUtils) or a declined approval falls through
 // to the gate.
 const ACTIVE_PLANS   = PLAN_ORDER;
-const NO_POPUP_PATHS = ["/app/billing", "/app/billing-return"];
+// Support is exempt alongside the billing pages: a merchant whose approval
+// failed is stuck behind the gate and is precisely who needs to reach us.
+const NO_POPUP_PATHS = ["/app/billing", "/app/billing-return", "/app/support"];
 
 // ─── LOADER ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -247,6 +249,7 @@ export default function App() {
         <Link to="/app/widget-settings">Widget Settings</Link>
         <Link to="/app/cleanup">Clean Plans</Link>
         <Link to="/app/billing">Upgrade Plans</Link>
+        <Link to="/app/support">Help and Support</Link>
       </NavMenu>
 
       {showPopup && <PlanGatePopup />}

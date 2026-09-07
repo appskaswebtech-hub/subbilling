@@ -157,6 +157,11 @@ model ShopPlan {
   // appUsageRecordCreate — the AppSubscription GID in `subscriptionId` is NOT
   // accepted there. Null on flat-fee plans, which have no usage line item.
   usageLineItemId  String?
+  // Currency the AppSubscription was created in, from shopBillingPreferences
+  // at approval time. Usage records MUST be priced in it. Stored rather than
+  // re-queried because Shopify fixes it at approval: a merchant who later
+  // changes their billing currency keeps the old one on this subscription.
+  billingCurrency  String    @default("USD")
   status           String    @default("active")  // "active" | "cancelled" | "expired"
   trialEndsAt      DateTime?
   billingStartedAt DateTime?

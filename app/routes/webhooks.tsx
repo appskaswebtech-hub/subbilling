@@ -97,7 +97,9 @@ export async function action({ request }: ActionFunctionArgs) {
         // does not fire subscription_billing_attempts/success for it — this
         // synthesized attempt is its only record, so commission is taken here.
         // No order GID on this payload, so the base falls back to the stored
-        // per-unit price.
+        // per-unit price — and that price is denominated in the contract's
+        // currency, which must be passed or the charge is refused as
+        // unverifiable rather than assumed to be USD.
         await chargeCommission({
           shop,
           admin,
@@ -105,6 +107,7 @@ export async function action({ request }: ActionFunctionArgs) {
           billingAttemptId: initialAttempt.id,
           contractGid:      contractId,
           orderGid:         null,
+          baseCurrency:     (contract?.currencyCode as string | undefined) ?? null,
         });
       }
 

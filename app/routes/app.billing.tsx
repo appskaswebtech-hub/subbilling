@@ -12,6 +12,36 @@ import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar }          from "@shopify/app-bridge-react";
 import { authenticate }      from "../shopify.server";
 import { PLANS, PLAN_KEYS, PLAN_ORDER } from "../config/plans";
+import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney } from "../config/currency";
+
+// The currency this shop pays Shopify for apps in. Every charge must match it.
+const SHOP_BILLING_CURRENCY_QUERY = `#graphql
+  query CommissionBillingCurrency {
+    shopBillingPreferences { currency }
+  }
+`;
+
+/**
+ * The shop's app-billing currency, or USD if it cannot be read.
+ *
+ * USD is accepted from every shop, so a failed lookup degrades to a working
+ * subscription rather than a blocked upgrade. Used by both the loader (to price
+ * the cards) and the action (to price the actual charge), so the two cannot
+ * disagree about what the merchant was shown.
+ */
+async function resolveShopBillingCurrency(
+  admin: { graphql: (q: string) => Promise<Response> },
+  shop:  string
+): Promise<string> {
+  try {
+    const res  = await admin.graphql(SHOP_BILLING_CURRENCY_QUERY);
+    const json = await res.json() as { data?: { shopBillingPreferences?: { currency?: string } } };
+    return resolveBillingCurrency(json?.data?.shopBillingPreferences?.currency);
+  } catch (err) {
+    console.warn(`[billing] could not read shopBillingPreferences for ${shop}; using USD:`, err);
+    return "USD";
+  }
+}
 import { getShopPlanFromDB } from "../utils/planUtils";
 import { getCommissionSummary } from "../lib/app-commission.server";
 import dashboardStyles from "../styles/dashboard.css?url";
@@ -36,14 +66,21 @@ const T = {
 
 // ─── Types ────────────────────────────────────────────────────
 interface CommissionData {
-  charged:    number;   // month-to-date, USD
+  charged:    number;   // month-to-date, in `currency` below
   count:      number;   // how many charges it came from
   cap:        number;   // the approved monthly ceiling
   capReached: boolean;  // Shopify has refused a usage record for hitting it
+  currency:   string;   // what `charged` and `cap` are denominated in
+  // "INR->USD" when a charge could not be converted into the billing
+  // currency. Null when everything billed normally.
+  unconvertible: string | null;
 }
 interface LoaderData {
   currentPlan: string;
   commission:  CommissionData | null;   // null on flat-fee plans
+  // The currency this shop will actually be charged in. Every price on the
+  // page is rendered in it so the cards match the approval screen.
+  currency:    string;
 }
 interface ActionData { confirmationUrl?: string; error?: string }
 interface UserError  { field: string; message: string }
@@ -82,20 +119,33 @@ const BILLING_TEST_MODE = true;
 
 // ─── Loader ───────────────────────────────────────────────────
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const record      = await getShopPlanFromDB(session.shop);
   const planMeta    = PLANS[record.plan];
 
+  // Price the cards in whatever the merchant will actually be charged in. A
+  // shop already on a plan keeps the currency Shopify fixed at approval;
+  // everyone else gets their current billing preference.
+  const currency = record.subscriptionId
+    ? record.billingCurrency
+    : await resolveShopBillingCurrency(admin, session.shop);
+
   // Only commission-priced plans have anything to report — skip the query
   // entirely on flat-fee tiers.
-  const commission: CommissionData | null = planMeta?.commissionRate
+  const summary = planMeta?.commissionRate
+    ? await getCommissionSummary(session.shop)
+    : null;
+
+  const commission: CommissionData | null = summary
     ? {
-        ...(await getCommissionSummary(session.shop)),
-        cap: planMeta.usageCappedAmount ?? 0,
+        ...summary,
+        // The cap must be shown in the same currency the charges are in, so it
+        // is localized the same way it was when the subscription was created.
+        cap: localizedCap(planMeta!.usageCappedAmount ?? 0, summary.currency),
       }
     : null;
 
-  return { currentPlan: record.plan, commission } satisfies LoaderData;
+  return { currentPlan: record.plan, commission, currency } satisfies LoaderData;
 };
 
 // ─── Action ───────────────────────────────────────────────────
@@ -110,16 +160,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const selectedPlan = PLANS[planKey];
 
+  // ── Which currency will this subscription be billed in? ───────────
+  // Shopify recommends charging in the merchant's own billing currency, and for
+  // the commission it is load-bearing: 2% of an order denominated in the shop's
+  // currency can only be billed correctly if the usage line shares it.
+  //
+  // Every tier is localized, so the amounts below must come from
+  // localizedPrice/localizedCap rather than the USD figures in PLANS — sending
+  // 9.99 with currencyCode "INR" would bill ₹9.99.
+  const billingCurrency = await resolveShopBillingCurrency(admin, shop);
+
   // A plan contributes a recurring line, a usage line, or both. The Free plan
   // is usage-only: no recurring line at all, so the merchant's Shopify bill
-  // stays at $0 until a subscription actually charges.
+  // stays at zero until a subscription actually charges.
   const lineItems: Record<string, unknown>[] = [];
 
   if (selectedPlan.price > 0) {
     lineItems.push({
       plan: {
         appRecurringPricingDetails: {
-          price:    { amount: selectedPlan.price, currencyCode: "USD" },
+          price: {
+            amount:       localizedPrice(selectedPlan.price, billingCurrency, planKey),
+            currencyCode: billingCurrency,
+          },
           interval: "EVERY_30_DAYS",
         },
       },
@@ -129,11 +192,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (selectedPlan.commissionRate) {
     // `terms` is shown verbatim to the merchant on the approval screen, and
     // `cappedAmount` is required by Shopify — usage pricing cannot be uncapped.
+    const cap = localizedCap(selectedPlan.usageCappedAmount ?? 0, billingCurrency);
+
     lineItems.push({
       plan: {
         appUsagePricingDetails: {
           terms:        selectedPlan.usageTerms ?? "Commission on each successful subscription charge",
-          cappedAmount: { amount: selectedPlan.usageCappedAmount ?? 0, currencyCode: "USD" },
+          cappedAmount: { amount: cap, currencyCode: billingCurrency },
         },
       },
     });
@@ -192,8 +257,9 @@ const PLAN_ICONS: Record<string, { icon: string; bg: string; fg: string }> = {
 };
 
 // ─── Feature comparison matrix (free / basic / pro / advanced) ─
+// The monthly fee row is prepended at render time from the shop's own currency
+// — hardcoding "$9.99" here would contradict the localized plan cards above it.
 const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
-  { label: "Monthly fee",           values: { free: "$0",        basic: "$9.99",   pro: "$14.99",    advanced: "$19.99"    } },
   { label: "Transaction fee",       values: { free: "2% per charge", basic: "—",   pro: "—",         advanced: "—"         } },
   { label: "Subscription plans",    values: { free: "Up to 5",   basic: "Up to 5", pro: "Up to 10",  advanced: "Unlimited" } },
   { label: "Subscription products", values: { free: "Up to 50",  basic: "Up to 50", pro: "Up to 500", advanced: "Unlimited" } },
@@ -205,7 +271,7 @@ const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
 
 // ─── Page ─────────────────────────────────────────────────────
 export default function BillingPage() {
-  const { currentPlan, commission } = useLoaderData<typeof loader>();
+  const { currentPlan, commission, currency } = useLoaderData<typeof loader>();
   const actionData      = useActionData<typeof action>() as ActionData | undefined;
   const navigation      = useNavigation();
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
@@ -228,9 +294,25 @@ export default function BillingPage() {
     if (actionData?.confirmationUrl) open(actionData.confirmationUrl, "_top");
   }, [actionData]);
 
-  function displayPrice(price: number) {
-    return `$${price.toFixed(2)}`;
+  // Every price on the page goes through here, so the cards, the compare table
+  // and the Shopify approval screen all quote the same figure.
+  function displayPrice(usdPrice: number, planKey: string) {
+    return formatMoney(localizedPrice(usdPrice, currency, planKey), currency);
   }
+
+  // Prepended to the compare table so the fee row follows the shop's currency.
+  const compareRows = [
+    {
+      label:  "Monthly fee",
+      values: Object.fromEntries(
+        PLAN_ORDER.map((k) => [
+          k,
+          PLANS[k]?.price ? displayPrice(PLANS[k].price, k) : formatMoney(0, currency),
+        ])
+      ),
+    },
+    ...COMPARE_ROWS,
+  ];
 
   const btn: React.CSSProperties = {
     fontSize: "12px", padding: "7px 14px", borderRadius: "8px",
@@ -329,10 +411,10 @@ export default function BillingPage() {
 
               <InlineStack gap="150" blockAlign="baseline">
                 <span style={{ fontSize: "26px", fontWeight: 700, lineHeight: 1 }}>
-                  {displayPrice(commission.charged)}
+                  {formatMoney(commission.charged, commission.currency)}
                 </span>
                 <Text as="span" variant="bodySm" tone="subdued">
-                  of {displayPrice(commission.cap)} monthly cap
+                  of {formatMoney(commission.cap, commission.currency)} monthly cap
                 </Text>
               </InlineStack>
 
@@ -353,6 +435,19 @@ export default function BillingPage() {
                   ? "⚠️ You've reached your monthly cap — no further commission can be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally."
                   : "Charged automatically each time one of your subscriptions bills successfully."}
               </Text>
+
+              {commission.unconvertible && (
+                <div style={{
+                  background: T.amberBg, border: "0.5px solid #E0B15E",
+                  borderRadius: "10px", padding: "12px 14px",
+                }}>
+                  <Text as="p" variant="bodySm">
+                    Some orders could not be converted for billing
+                    ({commission.unconvertible}), so no commission was taken on them.
+                    Your subscriptions bill as normal and you were not charged.
+                  </Text>
+                </div>
+              )}
             </BlockStack>
           </div>
         )}
@@ -416,7 +511,7 @@ export default function BillingPage() {
                   {/* Price */}
                   <div style={{ marginTop: "8px" }}>
                     <span style={{ fontSize: "32px", fontWeight: 700, lineHeight: 1 }}>
-                      {plan.price > 0 ? displayPrice(plan.price) : "Free"}
+                      {plan.price > 0 ? displayPrice(plan.price, plan.key) : "Free"}
                     </span>
                     <div style={{ fontSize: "12px", color: "var(--p-color-text-subdued)", marginTop: "2px" }}>
                       {plan.commissionRate
@@ -583,7 +678,7 @@ export default function BillingPage() {
                             {plan.label}
                           </div>
                           <div style={{ fontSize: "12px", color: "var(--p-color-text-subdued)", marginTop: "2px" }}>
-                            {plan.price > 0 ? `${displayPrice(plan.price)}/mo` : "Free"}
+                            {plan.price > 0 ? `${displayPrice(plan.price, plan.key)}/mo` : "Free"}
                           </div>
                           {isCurrent && (
                             <span style={{ display: "inline-block", marginTop: "4px", fontSize: "10px", fontWeight: 600, color: T.greenFg, background: T.greenBg, borderRadius: "10px", padding: "1px 8px" }}>
@@ -601,7 +696,7 @@ export default function BillingPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {COMPARE_ROWS.map((row) => (
+                  {compareRows.map((row) => (
                     <tr key={row.label}>
                       <td style={{ padding: "12px", fontSize: "13px", color: "var(--p-color-text)", borderBottom: "0.5px solid var(--p-color-border-secondary)", whiteSpace: "nowrap" }}>
                         {row.label}

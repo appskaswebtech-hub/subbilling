@@ -21,7 +21,12 @@ import { updateShopPlan } from "../utils/planUtils";
 // ─── Types ────────────────────────────────────────────────────
 interface AppSubscriptionLineItem {
   id:   string;
-  plan: { pricingDetails?: { __typename?: string } };
+  plan: {
+    pricingDetails?: {
+      __typename?:   string;
+      cappedAmount?: { amount?: string; currencyCode?: string };
+    };
+  };
 }
 
 interface ActiveSubscription {
@@ -57,7 +62,17 @@ const ACTIVE_SUBSCRIPTION_QUERY = `#graphql
         status
         lineItems {
           id
-          plan { pricingDetails { __typename } }
+          plan {
+            pricingDetails {
+              __typename
+              # The currency Shopify actually created the usage line in. Read
+              # back rather than assumed: this is what appUsageRecordCreate
+              # will demand, and it is fixed for the life of the subscription.
+              ... on AppUsagePricing {
+                cappedAmount { amount currencyCode }
+              }
+            }
+          }
         }
       }
     }
@@ -90,10 +105,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       // Commission is billed against this line item on every successful
       // subscription charge. Without it the shop is on a commission plan we
       // cannot invoice, so log loudly rather than failing silently.
-      const usageLineItemId =
-        activeSub.lineItems?.find(
-          (li) => li.plan?.pricingDetails?.__typename === "AppUsagePricing"
-        )?.id ?? null;
+      const usageLine = activeSub.lineItems?.find(
+        (li) => li.plan?.pricingDetails?.__typename === "AppUsagePricing"
+      );
+      const usageLineItemId = usageLine?.id ?? null;
+
+      // Shopify fixes the usage line's currency at approval, so take it from
+      // what came back rather than re-deriving it. Every later usage record
+      // must be priced in exactly this currency.
+      const billingCurrency =
+        usageLine?.plan?.pricingDetails?.cappedAmount?.currencyCode ?? "USD";
 
       if (planMeta?.commissionRate && !usageLineItemId) {
         console.error(
@@ -101,11 +122,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         );
       }
 
-      await updateShopPlan(shop, planKey, activeSub.id, usageLineItemId);
+      await updateShopPlan(shop, planKey, activeSub.id, usageLineItemId, billingCurrency);
 
       console.log(
         `[billing-return] ✅ Plan updated → ${planKey} for ${shop}` +
-        (usageLineItemId ? ` (usage line ${usageLineItemId})` : "")
+        (usageLineItemId ? ` (usage line ${usageLineItemId}, billed in ${billingCurrency})` : "")
       );
 
       return {
