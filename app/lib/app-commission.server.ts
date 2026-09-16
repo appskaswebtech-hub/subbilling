@@ -15,7 +15,7 @@
 
 import db          from "../db.server";
 import { PLANS, calcCommission, APP_BILLING_CURRENCY } from "../config/plans";
-import { convert } from "../config/currency";
+import { convert, localizedCap } from "../config/currency";
 
 // The subset of the Prisma Subscription row this module needs. Declared
 // structurally so callers can pass the full record without a cast.
@@ -140,6 +140,39 @@ function isCapError(message: string): boolean {
 }
 
 /**
+ * Start of the cap period.
+ *
+ * Shopify resets a usage cap on the app subscription's own 30-day cycle, not on
+ * the calendar month — this is an approximation of it, and the same one the
+ * merchant-facing summary uses. Shared so the headroom a reservation is clamped
+ * to and the total the card displays can never disagree.
+ */
+function capPeriodStart(): Date {
+  const start = new Date();
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+/**
+ * Commission left to claim this period, in the shop's billing currency.
+ *
+ * Counts CHARGED rows only — the cap is consumed by usage records Shopify
+ * actually accepted, so a PENDING estimate has taken up none of it yet.
+ */
+async function remainingHeadroom(shop: string, planKey: string, currency: string): Promise<number> {
+  const cap = localizedCap(PLANS[planKey]?.usageCappedAmount ?? 0, currency);
+  if (cap <= 0) return 0;
+
+  const charged = await db.commissionCharge.aggregate({
+    where: { shop, status: "CHARGED", createdAt: { gte: capPeriodStart() } },
+    _sum:  { amount: true },
+  });
+
+  return Math.max(0, cap - (charged._sum.amount ?? 0));
+}
+
+/**
  * Reserves an ESTIMATED commission when the cron creates a billing attempt.
  *
  * Nothing is billed here — no Shopify call is made. The row exists so the
@@ -179,8 +212,40 @@ export async function reserveCommission({
     });
     if (existing) return;
 
-    const amount = calcCommission(price, rate);
-    if (amount <= 0) return;   // nothing worth showing as pending
+    const estimate = calcCommission(price, rate);
+    if (estimate <= 0) return;   // nothing worth showing as pending
+
+    // The estimate is shown, never billed, so the plan's billing currency is
+    // good enough here. The real charge re-derives both base and currency from
+    // the order and refuses to bill what it cannot verify.
+    const currency = shopPlan.billingCurrency || APP_BILLING_CURRENCY;
+
+    // Never promise the merchant commission the cap cannot admit. A headroom
+    // lookup that fails falls back to the unclamped estimate: an optimistic
+    // number is better than no number, and Shopify decides the real outcome
+    // either way.
+    let headroom: number | null = null;
+    try {
+      headroom = await remainingHeadroom(shop, shopPlan.plan, currency);
+    } catch (err) {
+      console.warn(`[commission] headroom lookup failed for ${shop}; reserving unclamped:`, err);
+    }
+
+    // Cap already full. Recorded rather than dropped so the ledger still
+    // accounts for the attempt — SKIPPED keeps it out of both displayed totals.
+    if (headroom !== null && headroom <= 0) {
+      await db.commissionCharge.create({
+        data: {
+          shop, billingAttemptId, contractId: contractGid,
+          baseAmount: price, rate, amount: 0, currency,
+          status: "SKIPPED", reason: "capped-estimate",
+        },
+      });
+      console.log(`[commission] cap full for ${shop} — no estimate reserved for attempt ${billingAttemptId}`);
+      return;
+    }
+
+    const amount = headroom === null ? estimate : Math.min(estimate, headroom);
 
     await db.commissionCharge.create({
       data: {
@@ -190,12 +255,11 @@ export async function reserveCommission({
         baseAmount: price,
         rate,
         amount,
-        // The estimate is shown, never billed, so the plan's billing currency is
-        // good enough here. The real charge re-derives both base and currency
-        // from the order and refuses to bill what it cannot verify.
-        currency:   shopPlan.billingCurrency || APP_BILLING_CURRENCY,
+        currency,
         status:     "PENDING",
-        reason:     "estimate",
+        // Distinguished so a clamped figure is identifiable in the ledger — it
+        // is smaller than rate × base and would otherwise look like a bug.
+        reason:     amount < estimate ? "estimate-capped" : "estimate",
       },
     });
 
@@ -516,12 +580,8 @@ export async function chargeCommission({
  * flat-fee plan so callers need no branch of their own.
  */
 export async function getCommissionSummary(shop: string) {
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-
   const rows = await db.commissionCharge.findMany({
-    where:  { shop, createdAt: { gte: monthStart } },
+    where:  { shop, createdAt: { gte: capPeriodStart() } },
     select: { amount: true, status: true, reason: true, createdAt: true },
   });
 

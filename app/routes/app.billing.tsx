@@ -290,16 +290,27 @@ export default function BillingPage() {
   const pendingPct = commission && commission.cap > 0
     ? Math.min(100 - chargedPct, (commission.pending / commission.cap) * 100)
     : 0;
-  // Shopify has not refused anything yet, but what is in flight will get there.
-  // Worth warning about separately — the merchant can still re-approve a higher
-  // cap before the charges settle.
+  // The cap is genuinely used up: further charges cannot be billed, whether or
+  // not Shopify has had occasion to refuse one yet.
+  const capUsedUp =
+    !!commission && commission.cap > 0 && commission.charged >= commission.cap;
+
+  // Shopify has not refused anything and the cap is not full YET, but what is in
+  // flight will get there. Only meaningful while something is actually settling
+  // — once pending drains, `capUsedUp` is the accurate statement.
   const capReachedByEstimate =
-    !!commission && commission.cap > 0 &&
+    !!commission && commission.cap > 0 && commission.pending > 0 &&
     commission.charged + commission.pending >= commission.cap;
+
+  // Every "this cap is spent" affordance keys off one value: the card's
+  // background and border, the bar, and the swatch dots. A merchant whose cap is
+  // full sees the warning styling immediately, not only after Shopify bounces
+  // their next charge.
+  const capFull = !!commission?.capReached || capUsedUp;
 
   // One colour for both bar segments and both swatch dots, so the figures above
   // the bar and the bar itself cannot drift apart.
-  const barColor = commission?.capReached ? T.amberFg : T.purple;
+  const barColor = capFull ? T.amberFg : T.purple;
 
   // Close the compare modal on Escape
   useEffect(() => {
@@ -417,8 +428,8 @@ export default function BillingPage() {
           <div
             className="hover-card"
             style={{
-              background:   commission.capReached ? T.amberBg : "var(--p-color-bg-surface)",
-              border:       `0.5px solid ${commission.capReached ? "#E0B15E" : "var(--p-color-border)"}`,
+              background:   capFull ? T.amberBg : "var(--p-color-bg-surface)",
+              border:       `0.5px solid ${capFull ? "#E0B15E" : "var(--p-color-border)"}`,
               borderRadius: "12px",
               padding:      "16px 20px",
             }}
@@ -484,6 +495,8 @@ export default function BillingPage() {
               <Text as="p" variant="bodySm" tone="subdued">
                 {commission.capReached
                   ? "⚠️ You've reached your monthly cap — no further commission can be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally."
+                  : capUsedUp
+                  ? `⚠️ You've used your full ${formatMoney(commission.cap, commission.currency)} cap this month. The next successful charge will not be billed until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally.`
                   : capReachedByEstimate
                   ? `Charges still settling are expected to reach your ${formatMoney(commission.cap, commission.currency)} cap this month. Past it, no further commission can be charged until you re-approve a higher cap — your subscriptions keep billing normally.`
                   : commission.pending > 0

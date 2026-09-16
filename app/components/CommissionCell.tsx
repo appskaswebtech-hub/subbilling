@@ -69,7 +69,10 @@ export function CommissionCell({
   // Everything else was NOT billed. Say so in the merchant's terms rather than
   // showing a number they were never charged.
   const note =
-    row.reason === "capped"       ? "Cap reached — not charged"
+    // "capped" is Shopify refusing the record; "capped-estimate" is us declining
+    // to reserve against a cap already full. Same story for the merchant.
+    row.reason === "capped" ||
+    row.reason === "capped-estimate" ? "Cap reached — not charged"
     : row.reason === "zero-amount" ? "—"
     : row.status === "SKIPPED"     ? "Not charged"
     : "Not charged (retrying)";
