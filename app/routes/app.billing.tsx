@@ -68,6 +68,10 @@ const T = {
 interface CommissionData {
   charged:    number;   // month-to-date, in `currency` below
   count:      number;   // how many charges it came from
+  // Estimated commission on billing attempts that have not settled yet. NOT
+  // money the merchant has been charged — kept apart from `charged` everywhere.
+  pending:      number;
+  pendingCount: number;
   cap:        number;   // the approved monthly ceiling
   capReached: boolean;  // Shopify has refused a usage record for hitting it
   currency:   string;   // what `charged` and `cap` are denominated in
@@ -277,6 +281,26 @@ export default function BillingPage() {
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
 
+  // Usage-bar geometry. Charged takes its share of the cap first; pending gets
+  // only the headroom left over, so the two segments never overflow the bar even
+  // when in-flight estimates would carry the total past the cap.
+  const chargedPct = commission && commission.cap > 0
+    ? Math.min(100, (commission.charged / commission.cap) * 100)
+    : 0;
+  const pendingPct = commission && commission.cap > 0
+    ? Math.min(100 - chargedPct, (commission.pending / commission.cap) * 100)
+    : 0;
+  // Shopify has not refused anything yet, but what is in flight will get there.
+  // Worth warning about separately — the merchant can still re-approve a higher
+  // cap before the charges settle.
+  const capReachedByEstimate =
+    !!commission && commission.cap > 0 &&
+    commission.charged + commission.pending >= commission.cap;
+
+  // One colour for both bar segments and both swatch dots, so the figures above
+  // the bar and the bar itself cannot drift apart.
+  const barColor = commission?.capReached ? T.amberFg : T.purple;
+
   // Close the compare modal on Escape
   useEffect(() => {
     if (!showCompare) return;
@@ -405,35 +429,66 @@ export default function BillingPage() {
                   Commission this month
                 </Text>
                 <Text as="span" variant="bodySm" tone="subdued">
-                  {commission.count} charge{commission.count === 1 ? "" : "s"}
-                </Text>
-              </InlineStack>
-
-              <InlineStack gap="150" blockAlign="baseline">
-                <span style={{ fontSize: "26px", fontWeight: 700, lineHeight: 1 }}>
-                  {formatMoney(commission.charged, commission.currency)}
-                </span>
-                <Text as="span" variant="bodySm" tone="subdued">
                   of {formatMoney(commission.cap, commission.currency)} monthly cap
                 </Text>
               </InlineStack>
 
-              {/* Usage bar */}
-              <div style={{ height: "6px", borderRadius: "4px", background: "var(--p-color-bg-surface-secondary)", overflow: "hidden" }}>
-                <div
-                  style={{
-                    height: "100%",
-                    width: `${Math.min(100, commission.cap > 0 ? (commission.charged / commission.cap) * 100 : 0)}%`,
-                    background: commission.capReached ? T.amberFg : T.purple,
-                    borderRadius: "4px",
-                  }}
-                />
+              {/* Charged and pending, always both. The swatch dots are what tie
+                  each figure to its segment of the bar below — without them the
+                  lighter segment reads as empty track. */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "12px 32px" }}>
+                <div style={{ minWidth: "140px" }}>
+                  <InlineStack gap="150" blockAlign="center">
+                    <span style={{
+                      width: "8px", height: "8px", borderRadius: "50%",
+                      background: barColor, display: "inline-block",
+                    }} />
+                    <Text as="span" variant="bodySm" tone="subdued">Charged</Text>
+                  </InlineStack>
+                  <div style={{ fontSize: "26px", fontWeight: 700, lineHeight: 1.3 }}>
+                    {formatMoney(commission.charged, commission.currency)}
+                  </div>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    {commission.count} charge{commission.count === 1 ? "" : "s"}
+                  </Text>
+                </div>
+
+                <div style={{ minWidth: "140px" }}>
+                  <InlineStack gap="150" blockAlign="center">
+                    <span style={{
+                      width: "8px", height: "8px", borderRadius: "50%",
+                      background: barColor, opacity: 0.35, display: "inline-block",
+                    }} />
+                    <Text as="span" variant="bodySm" tone="subdued">Pending</Text>
+                  </InlineStack>
+                  <div style={{
+                    fontSize: "26px", fontWeight: 700, lineHeight: 1.3,
+                    color: "var(--p-color-text-subdued)",
+                  }}>
+                    ≈ {formatMoney(commission.pending, commission.currency)}
+                  </div>
+                  <Text as="p" variant="bodySm" tone="subdued">
+                    {commission.pendingCount} still settling
+                  </Text>
+                </div>
+              </div>
+
+              {/* Usage bar. Charged is solid, pending is a lighter segment beside
+                  it. The two widths are clamped to 100% between them, so the bar
+                  stops at the cap even while attempts are still in flight. */}
+              <div style={{ height: "6px", borderRadius: "4px", background: "var(--p-color-bg-surface-secondary)", overflow: "hidden", display: "flex" }}>
+                <div style={{ height: "100%", width: `${chargedPct}%`, background: barColor }} />
+                <div style={{ height: "100%", width: `${pendingPct}%`, background: barColor, opacity: 0.35 }} />
               </div>
 
               <Text as="p" variant="bodySm" tone="subdued">
                 {commission.capReached
                   ? "⚠️ You've reached your monthly cap — no further commission can be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally."
-                  : "Charged automatically each time one of your subscriptions bills successfully."}
+                  : capReachedByEstimate
+                  ? `Charges still settling are expected to reach your ${formatMoney(commission.cap, commission.currency)} cap this month. Past it, no further commission can be charged until you re-approve a higher cap — your subscriptions keep billing normally.`
+                  : commission.pending > 0
+                  ? `Charged automatically each time one of your subscriptions bills successfully. ${commission.pendingCount} charge${commission.pendingCount === 1 ? " is" : "s are"} still settling — pending amounts are estimates and are not billed until the charge succeeds.`
+                  : "Charged automatically each time one of your subscriptions bills successfully. Pending is an estimate for charges still settling — it is never billed until the charge succeeds."}
               </Text>
 
               {commission.unconvertible && (

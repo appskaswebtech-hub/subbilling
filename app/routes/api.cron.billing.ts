@@ -21,6 +21,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
 import { json }            from "@remix-run/node";
 import { unauthenticated } from "../shopify.server";
 import db                  from "../db.server";
+import { reserveCommission, sweepStaleReservations } from "../lib/app-commission.server";
 
 // ─── GraphQL mutation ─────────────────────────────────────────
 const BILLING_ATTEMPT_CREATE = `#graphql
@@ -130,6 +131,10 @@ export function advanceBillingDate(from: Date, frequency: string): Date {
 // ─── Core billing logic ───────────────────────────────────────
 async function runBilling() {
   const now = new Date();
+
+  // Release reservations whose attempt already settled but whose ledger write
+  // was lost. Done first so this run's cap headroom reflects reality.
+  await sweepStaleReservations();
 
   const dueSubs = await db.subscription.findMany({
     where: {
@@ -241,7 +246,7 @@ async function runBilling() {
       if (attempt) {
         const nextDate = advanceBillingDate(fresh.nextBillingDate, fresh.frequency);
 
-        await db.$transaction([
+        const [created] = await db.$transaction([
           db.billingAttempt.create({
             data: { subscriptionId: fresh.id, amount: fresh.price, status: "PENDING" },
           }),
@@ -250,6 +255,17 @@ async function runBilling() {
             data:  { nextBillingDate: nextDate },
           }),
         ]);
+
+        // Show the merchant what this charge will cost them in commission
+        // before it settles. Deliberately OUTSIDE the transaction above: the
+        // estimate is a display concern and must never roll back a billing
+        // attempt that Shopify has already accepted.
+        await reserveCommission({
+          shop:             fresh.shop,
+          billingAttemptId: created.id,
+          contractGid:      fresh.shopifyContractId,
+          price:            fresh.price,
+        });
 
         console.log(`[cron] ✅ PENDING — ${fresh.shopifyContractId} — frequency: ${fresh.frequency} — next: ${nextDate.toISOString()}`);
         results.push({ contractId: fresh.shopifyContractId, result: "PENDING" });

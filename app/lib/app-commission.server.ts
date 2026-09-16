@@ -63,9 +63,30 @@ const ORDER_TOTAL_QUERY = `#graphql
   }
 `;
 
+// ─── Ledger statuses ──────────────────────────────────────────────────────────
+//   PENDING  an estimate reserved when the cron created the billing attempt.
+//            Nothing has been billed; it exists so the merchant can see what is
+//            in flight and how much cap headroom it will consume.
+//   CHARGED  billed through appUsageRecordCreate. The only status that counts
+//            as revenue.
+//   SKIPPED  deliberately not billed — the cap was hit, the amount was zero, or
+//            there was no usage line to bill against.
+//   FAILED   we tried and could not. Retryable.
+//   VOID     a reservation released because the billing attempt failed.
+//
+// Once a row is CHARGED or SKIPPED the outcome is settled and no later call may
+// change it.
+const TERMINAL_STATUSES = new Set(["CHARGED", "SKIPPED"]);
+
+// How long a reservation may sit PENDING before the summary stops counting it.
+// A billing attempt settles within minutes; a week means its webhook is not
+// coming, and the estimate must stop consuming displayed cap headroom.
+const PENDING_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
 // Every ledger write goes through here. It must be an upsert, not a create:
-// billingAttemptId is unique, and a retry after a FAILED row would otherwise
-// hit the constraint instead of recording the successful second attempt.
+// billingAttemptId is unique, and a retry after a FAILED row — or the estimate
+// reserveCommission already wrote — would otherwise hit the constraint instead
+// of recording the real outcome.
 type LedgerWrite = {
   shop:             string;
   billingAttemptId: string;
@@ -75,7 +96,7 @@ type LedgerWrite = {
   amount:           number;
   /** Currency of `baseAmount`. Null when we could not establish it. */
   currency?:        string | null;
-  status:           "CHARGED" | "SKIPPED" | "FAILED";
+  status:           "PENDING" | "CHARGED" | "SKIPPED" | "FAILED" | "VOID";
   reason?:          string | null;
   usageRecordId?:   string | null;
 };
@@ -119,6 +140,128 @@ function isCapError(message: string): boolean {
 }
 
 /**
+ * Reserves an ESTIMATED commission when the cron creates a billing attempt.
+ *
+ * Nothing is billed here — no Shopify call is made. The row exists so the
+ * merchant sees in-flight commission and the cap headroom it will consume
+ * before the charge settles. `chargeCommission` later upserts the same row
+ * (same `billingAttemptId`) with the real amount, or `voidCommission` releases
+ * it when the attempt fails.
+ *
+ * Safe to call for every shop on every attempt — it self-selects on the plan.
+ * Like `chargeCommission`, it must NEVER throw: a missing estimate is a display
+ * gap, and must not be the reason a billing attempt does not go out.
+ */
+export async function reserveCommission({
+  shop,
+  billingAttemptId,
+  contractGid,
+  price,
+}: {
+  shop:             string;
+  billingAttemptId: string;
+  contractGid:      string;
+  /** Base to estimate from — the local Subscription.price. */
+  price:            number;
+}): Promise<void> {
+  try {
+    const shopPlan = await db.shopPlan.findUnique({ where: { shop } });
+    const rate     = shopPlan ? PLANS[shopPlan.plan]?.commissionRate : undefined;
+
+    if (!shopPlan || !rate) return;   // flat-fee tier — nothing will be owed
+
+    // Never overwrite a settled outcome. The success webhook can beat the cron's
+    // own follow-up write, and a real CHARGED amount must not revert to an
+    // estimate.
+    const existing = await db.commissionCharge.findUnique({
+      where:  { billingAttemptId },
+      select: { status: true },
+    });
+    if (existing) return;
+
+    const amount = calcCommission(price, rate);
+    if (amount <= 0) return;   // nothing worth showing as pending
+
+    await db.commissionCharge.create({
+      data: {
+        shop,
+        billingAttemptId,
+        contractId: contractGid,
+        baseAmount: price,
+        rate,
+        amount,
+        // The estimate is shown, never billed, so the plan's billing currency is
+        // good enough here. The real charge re-derives both base and currency
+        // from the order and refuses to bill what it cannot verify.
+        currency:   shopPlan.billingCurrency || APP_BILLING_CURRENCY,
+        status:     "PENDING",
+        reason:     "estimate",
+      },
+    });
+
+    console.log(`[commission] reserved estimate ${amount} for attempt ${billingAttemptId} (${shop})`);
+  } catch (err) {
+    console.error(`[commission] could not reserve estimate for attempt ${billingAttemptId}:`, err);
+  }
+}
+
+/**
+ * Releases a reservation whose billing attempt failed.
+ *
+ * Scoped to PENDING rows so a charge that already settled is never disturbed —
+ * this runs from the failure webhook, which can race a success for the same
+ * subscription.
+ */
+export async function voidCommission(billingAttemptId: string): Promise<void> {
+  try {
+    const { count } = await db.commissionCharge.updateMany({
+      where: { billingAttemptId, status: "PENDING" },
+      data:  { status: "VOID", reason: "attempt-failed" },
+    });
+
+    if (count) console.log(`[commission] released estimate for failed attempt ${billingAttemptId}`);
+  } catch (err) {
+    console.error(`[commission] could not void estimate for attempt ${billingAttemptId}:`, err);
+  }
+}
+
+/**
+ * Releases reservations whose billing attempt is no longer PENDING.
+ *
+ * The safety net for a webhook that updated the attempt but died before the
+ * ledger write. Without it a stale estimate would consume the merchant's
+ * displayed headroom indefinitely. Called from the cron, which runs anyway.
+ */
+export async function sweepStaleReservations(): Promise<number> {
+  try {
+    const stale = await db.commissionCharge.findMany({
+      where:  { status: "PENDING" },
+      select: { billingAttemptId: true },
+    });
+    if (!stale.length) return 0;
+
+    // Which of those attempts have moved on? A PENDING attempt is still in
+    // flight and its reservation is legitimate.
+    const settled = await db.billingAttempt.findMany({
+      where:  { id: { in: stale.map((s) => s.billingAttemptId) }, status: { not: "PENDING" } },
+      select: { id: true },
+    });
+    if (!settled.length) return 0;
+
+    const { count } = await db.commissionCharge.updateMany({
+      where: { billingAttemptId: { in: settled.map((s) => s.id) }, status: "PENDING" },
+      data:  { status: "VOID", reason: "stale-reservation" },
+    });
+
+    if (count) console.log(`[commission] swept ${count} stale reservation(s)`);
+    return count;
+  } catch (err) {
+    console.error("[commission] stale reservation sweep failed:", err);
+    return 0;
+  }
+}
+
+/**
  * Records a commission for one successful subscription charge.
  *
  * Safe to call for every shop on every success — it self-selects on the shop's
@@ -145,15 +288,22 @@ export async function chargeCommission({
     // not otherwise re-entrant.
     //
     // A settled outcome — CHARGED, or SKIPPED for a business reason such as a
-    // cap breach — blocks the retry. FAILED does NOT: it means we never got a
-    // usage record out of Shopify, and retrying is safe because the mutation
-    // carries `billingAttemptId` as its idempotencyKey, so Shopify itself
-    // rejects a genuine double-charge. Treating FAILED as terminal would
-    // forfeit the commission on any transient error.
+    // cap breach — blocks the retry. Nothing else does:
+    //
+    //   FAILED  we never got a usage record out of Shopify. Retrying is safe
+    //           because the mutation carries `billingAttemptId` as its
+    //           idempotencyKey, so Shopify itself rejects a genuine
+    //           double-charge. Treating it as terminal would forfeit the
+    //           commission on any transient error.
+    //   PENDING an estimate reserveCommission wrote at cron time. This call is
+    //           exactly what it was waiting for — it MUST fall through, or the
+    //           reservation would permanently block the real charge.
+    //   VOID    a released reservation. A late success after a failure webhook
+    //           is unusual but still owed.
     const existing = await db.commissionCharge.findUnique({
       where: { billingAttemptId },
     });
-    if (existing && existing.status !== "FAILED") {
+    if (existing && TERMINAL_STATUSES.has(existing.status)) {
       console.log(`[commission] already ${existing.status} for attempt ${billingAttemptId} — skipping`);
       return;
     }
@@ -372,12 +522,20 @@ export async function getCommissionSummary(shop: string) {
 
   const rows = await db.commissionCharge.findMany({
     where:  { shop, createdAt: { gte: monthStart } },
-    select: { amount: true, status: true, reason: true },
+    select: { amount: true, status: true, reason: true, createdAt: true },
   });
 
   // Only CHARGED rows carry an amount in the shop's billing currency; a
   // SKIPPED row's amount may be in the order's, so it must never be summed in.
   const charged = rows.filter((r) => r.status === "CHARGED");
+
+  // In-flight estimates. A reservation older than the window below has almost
+  // certainly lost its webhook — the cron sweep normally clears those, but this
+  // guard keeps a stale row from eating the merchant's headroom even if the
+  // sweep has not run. PENDING rows are written in the billing currency by
+  // reserveCommission, so they are safe to sum alongside CHARGED.
+  const staleBefore = new Date(Date.now() - PENDING_STALE_AFTER_MS);
+  const pendingRows = rows.filter((r) => r.status === "PENDING" && r.createdAt >= staleBefore);
 
   // The subscription's currency is fixed at approval, so every CHARGED row for
   // this shop shares it — read it from the plan rather than from the rows.
@@ -386,6 +544,10 @@ export async function getCommissionSummary(shop: string) {
   return {
     charged:   charged.reduce((sum, r) => sum + r.amount, 0),
     count:     charged.length,
+    // Estimated, not billed. Kept separate from `charged` so the page can never
+    // present it as money the merchant has actually been charged.
+    pending:      pendingRows.reduce((sum, r) => sum + r.amount, 0),
+    pendingCount: pendingRows.length,
     currency:  shopPlan?.billingCurrency || APP_BILLING_CURRENCY,
     // True once Shopify has refused a usage record for hitting the monthly cap:
     // the merchant is now getting the app for free and needs to re-approve.

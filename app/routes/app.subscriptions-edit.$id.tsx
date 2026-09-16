@@ -22,6 +22,9 @@ import {
   type ShopifyContract,
 } from "../lib/subscription-sync.server";
 import { handleContractEdit } from "../lib/subscription-edit.server";
+import { formatMoney } from "../config/currency";
+import { CommissionCell } from "../components/CommissionCell";
+import { splitCommissions } from "../lib/commission-display";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // Everything imported from a .server module above is referenced ONLY inside
@@ -198,6 +201,28 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     where: { subscriptionId: subscription.id, status: "PENDING" },
   });
 
+  // What the app actually billed the merchant for each of these attempts.
+  // Read back rather than recomputed: the stored amount is the one that went to
+  // appUsageRecordCreate, so a capped or unconverted cycle shows as the zero it
+  // really was instead of a percentage we never collected.
+  const commissionRows = await prisma.commissionCharge.findMany({
+    where:  { billingAttemptId: { in: subscription.billingAttempts.map((a) => a.id) } },
+    select: {
+      billingAttemptId: true,
+      amount:           true,
+      currency:         true,
+      status:           true,
+      reason:           true,
+      usageRecordId:    true,
+    },
+  });
+
+  // Keyed by attempt id so the table can look a row up without a nested find.
+  // billingAttemptId is unique, so this never collapses two charges into one.
+  const commissions = Object.fromEntries(
+    commissionRows.map((c) => [c.billingAttemptId, c]),
+  );
+
   return json({
     subscription,
     contract,
@@ -205,6 +230,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     orders,
     ordersError,
     ordersScopeMissing,
+    commissions,
     revision:          contractRevision(contract),
     hasPendingAttempt: pendingAttempts > 0,
   });
@@ -346,6 +372,7 @@ function fmtDateTime(date: string | Date) {
   });
 }
 
+
 // ─── Detail row ──────────────────────────────────────────────
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -415,7 +442,7 @@ function SectionCard({ title, icon, children }: { title: string; icon?: string; 
 export default function SubscriptionDetail() {
   const {
     subscription, contract, contractError, revision, hasPendingAttempt,
-    orders, ordersError, ordersScopeMissing,
+    orders, ordersError, ordersScopeMissing, commissions,
   } = useLoaderData<typeof loader>();
   const actionData        = useActionData<typeof action>();
   const submit            = useSubmit();
@@ -456,6 +483,11 @@ export default function SubscriptionDetail() {
   const successAttempts = s.billingAttempts.filter((a) => a.status === "SUCCESS");
   const failedAttempts  = s.billingAttempts.filter((a) => a.status === "FAILED");
   const totalCollected  = successAttempts.reduce((sum, a) => sum + a.amount, 0);
+
+  // Charged is money the merchant has been billed; pending is only reserved
+  // against attempts still in flight. Kept apart so the two never read as one
+  // number.
+  const commissionTotals = splitCommissions(Object.values(commissions));
 
   return (
     <Page>
@@ -806,7 +838,7 @@ export default function SubscriptionDetail() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
-                        {["Date", "Amount", "Status", "Error"].map((h, i) => (
+                        {["Date", "Amount", "Status", "Commission", "Error"].map((h, i) => (
                           <th
                             key={i}
                             style={{
@@ -850,6 +882,9 @@ export default function SubscriptionDetail() {
                             </td>
                             <td style={cell}>
                               {statusPill(a.status)}
+                            </td>
+                            <td style={cell}>
+                              <CommissionCell row={commissions[a.id]} attemptStatus={a.status} />
                             </td>
                             <td style={{ ...cell, color: "var(--p-color-text-subdued)", fontSize: "11px" }}>
                               {a.errorMessage ?? "—"}
@@ -937,11 +972,37 @@ export default function SubscriptionDetail() {
                   {failedAttempts.length}
                 </span>
               </DetailRow>
-              <DetailRowLast label="Total collected">
+              <DetailRow label="Total collected">
                 <Text as="span" variant="bodySm" fontWeight="semibold">
                   ${totalCollected.toFixed(2)}
                 </Text>
-              </DetailRowLast>
+              </DetailRow>
+              {commissionTotals.pending > 0 ? (
+                <>
+                  <DetailRow label="Commission charged">
+                    <Text as="span" variant="bodySm" fontWeight="semibold">
+                      {commissionTotals.chargedCount === 0
+                        ? "—"
+                        : formatMoney(commissionTotals.charged, commissionTotals.currency)}
+                    </Text>
+                  </DetailRow>
+                  <DetailRowLast label="Commission pending">
+                    <Text as="span" variant="bodySm" tone="subdued">
+                      <span title="Estimated — not yet charged">
+                        ≈ {formatMoney(commissionTotals.pending, commissionTotals.currency)}
+                      </span>
+                    </Text>
+                  </DetailRowLast>
+                </>
+              ) : (
+                <DetailRowLast label="Commission charged">
+                  <Text as="span" variant="bodySm" fontWeight="semibold">
+                    {commissionTotals.chargedCount === 0
+                      ? "—"
+                      : formatMoney(commissionTotals.charged, commissionTotals.currency)}
+                  </Text>
+                </DetailRowLast>
+              )}
             </SectionCard>
 
           </BlockStack>

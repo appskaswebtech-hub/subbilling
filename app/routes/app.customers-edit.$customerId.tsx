@@ -16,6 +16,9 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { IconCell, CellIcon, IconCalendar, IconBox, rowColorFor } from "../components/TableIcons";
+import { CommissionCell } from "../components/CommissionCell";
+import { splitCommissions } from "../lib/commission-display";
+import { formatMoney } from "../config/currency";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 // ─── Design tokens ───────────────────────────────────────────
 const T = {
@@ -206,6 +209,35 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     ? `https://${session.shop}/admin/customers/${shopifyGid.split("/").pop()}`
     : `https://${session.shop}/admin/customers?email=${encodeURIComponent(customerEmail)}`;
 
+  const recentAttempts = allAttempts
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 20);
+
+  // What the app billed this merchant for the attempts actually on screen.
+  // Read back from the ledger rather than recomputed, so a capped or
+  // unconverted cycle shows as the zero it really was. Scoped to the 20 rows
+  // rendered, not every attempt this customer ever had.
+  const commissionRows = await prisma.commissionCharge.findMany({
+    where:  { billingAttemptId: { in: recentAttempts.map((a) => a.id) } },
+    select: {
+      billingAttemptId: true,
+      amount:           true,
+      currency:         true,
+      status:           true,
+      reason:           true,
+      usageRecordId:    true,
+    },
+  });
+
+  // billingAttemptId is unique, so this never collapses two charges into one.
+  const commissions = Object.fromEntries(
+    commissionRows.map((c) => [c.billingAttemptId, c]),
+  );
+
+  // Scoped to the attempts on screen, NOT this customer's whole history — the
+  // same 20-row window the table below renders.
+  const commissionTotals = splitCommissions(commissionRows);
+
   return json({
     subscriptions,
     shopifyCustomer,
@@ -220,10 +252,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       totalAttempts:   allAttempts.length,
       successAttempts: successAttempts.length,
       failedAttempts:  failedAttempts.length,
+      // App commission on those attempts — what this customer's subscriptions
+      // have cost the merchant in commission, and what is still settling.
+      commissionCharged:  commissionTotals.charged,
+      commissionPending:  commissionTotals.pending,
+      commissionCurrency: commissionTotals.currency,
     },
-    recentAttempts: allAttempts
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 20),
+    recentAttempts,
+    commissions,
   });
 }
 
@@ -270,7 +306,7 @@ function Row({ label, children, last }: {
 export default function CustomerDetail() {
   const {
     subscriptions, shopifyCustomer, customerEmail,
-    shopifyAdminCustomerUrl, stats, recentAttempts,
+    shopifyAdminCustomerUrl, stats, recentAttempts, commissions,
   } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
 
@@ -492,7 +528,7 @@ export default function CustomerDetail() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
-                        {["Date", "Product", "Amount", "Status", "Error"].map((h, i) => (
+                        {["Date", "Product", "Amount", "Status", "Commission", "Error"].map((h, i) => (
                           <th key={i} style={th}>{h}</th>
                         ))}
                       </tr>
@@ -515,6 +551,9 @@ export default function CustomerDetail() {
                             </td>
                             <td style={{ ...cell, fontWeight: 500 }}>{fmt$(a.amount)}</td>
                             <td style={cell}>{statusPill(a.status)}</td>
+                            <td style={cell}>
+                              <CommissionCell row={commissions[a.id]} attemptStatus={a.status} />
+                            </td>
                             <td style={{ ...cell, color: "var(--p-color-text-subdued)", fontSize: "11px" }}>
                               {a.errorMessage ?? "—"}
                             </td>
@@ -627,6 +666,25 @@ export default function CustomerDetail() {
               <Row label="Total attempts">
                 <Text as="span" variant="bodySm" fontWeight="semibold">{stats.totalAttempts}</Text>
               </Row>
+
+              {/* App commission. formatMoney rather than fmt$ — this is the
+                  shop's app-billing currency, which need not be USD. */}
+              <Row label="Commission charged">
+                <Text as="span" variant="bodySm" fontWeight="semibold">
+                  {stats.commissionCharged > 0
+                    ? formatMoney(stats.commissionCharged, stats.commissionCurrency)
+                    : "—"}
+                </Text>
+              </Row>
+              {stats.commissionPending > 0 && (
+                <Row label="Commission pending">
+                  <Text as="span" variant="bodySm" tone="subdued">
+                    <span title="Estimated — not yet charged">
+                      ≈ {formatMoney(stats.commissionPending, stats.commissionCurrency)}
+                    </span>
+                  </Text>
+                </Row>
+              )}
                <div className="total-spend">
               <Row label="Total collected" last>
                 <Text as="span" variant="bodySm" fontWeight="semibold">

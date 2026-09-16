@@ -4,7 +4,7 @@ import type { ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { chargeCommission } from "../lib/app-commission.server";
+import { chargeCommission, voidCommission } from "../lib/app-commission.server";
 import {
   SUBSCRIPTION_CONTRACT_QUERY,
   advanceBillingDate,
@@ -285,6 +285,11 @@ export async function action({ request }: ActionFunctionArgs) {
           where: { id: pending.id },
           data:  { status: "FAILED", errorMessage: errMsg },
         });
+
+        // Release the commission estimate the cron reserved for this attempt.
+        // Nothing was billed, so the merchant's cap headroom must come back for
+        // the retry. No-ops if the row already settled.
+        await voidCommission(pending.id);
       } else {
         await prisma.billingAttempt.create({
           data: { subscriptionId: sub.id, amount: sub.price, status: "FAILED", errorMessage: errMsg },
