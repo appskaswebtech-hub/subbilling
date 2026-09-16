@@ -113,6 +113,16 @@ export const PLANS: Record<string, Plan> = {
  */
 export const APP_BILLING_CURRENCY = "USD";
 
+/**
+ * How close to `usageCappedAmount` a shop must get before the billing page warns
+ * them, in USD like every other figure here.
+ *
+ * Purely a display trigger — it changes nothing about what is reserved or
+ * charged. Its job is to give the merchant time to re-approve a higher cap
+ * before commission starts being refused.
+ */
+export const CAP_WARNING_THRESHOLD_USD = 6;
+
 export const PLAN_KEYS = Object.keys(PLANS);
 
 // Order the billing page and compare table render in: cheapest first.

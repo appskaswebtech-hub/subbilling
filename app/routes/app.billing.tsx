@@ -11,8 +11,8 @@ import { useState, useEffect } from "react";
 import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar }          from "@shopify/app-bridge-react";
 import { authenticate }      from "../shopify.server";
-import { PLANS, PLAN_KEYS, PLAN_ORDER } from "../config/plans";
-import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney } from "../config/currency";
+import { PLANS, PLAN_KEYS, PLAN_ORDER, APP_BILLING_CURRENCY, CAP_WARNING_THRESHOLD_USD } from "../config/plans";
+import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney, convert } from "../config/currency";
 
 // The currency this shop pays Shopify for apps in. Every charge must match it.
 const SHOP_BILLING_CURRENCY_QUERY = `#graphql
@@ -75,6 +75,8 @@ interface CommissionData {
   cap:        number;   // the approved monthly ceiling
   capReached: boolean;  // Shopify has refused a usage record for hitting it
   currency:   string;   // what `charged` and `cap` are denominated in
+  // How near the cap the merchant must get before the page warns, in `currency`.
+  warnThreshold: number;
   // "INR->USD" when a charge could not be converted into the billing
   // currency. Null when everything billed normally.
   unconvertible: string | null;
@@ -146,6 +148,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         // The cap must be shown in the same currency the charges are in, so it
         // is localized the same way it was when the subscription was created.
         cap: localizedCap(planMeta!.usageCappedAmount ?? 0, summary.currency),
+        // `convert`, NOT localizedCap: this is a distance to compare against,
+        // and localizedCap deliberately rounds to a presentable figure (₹498 →
+        // ₹500), which is right for a headline price and wrong here. A currency
+        // we have no rate for falls back to the USD figure rather than dropping
+        // the warning.
+        warnThreshold:
+          convert(CAP_WARNING_THRESHOLD_USD, APP_BILLING_CURRENCY, summary.currency)
+          ?? CAP_WARNING_THRESHOLD_USD,
       }
     : null;
 
@@ -308,6 +318,16 @@ export default function BillingPage() {
   // their next charge.
   const capFull = !!commission?.capReached || capUsedUp;
 
+  // Close enough to the cap that the merchant should act now — they can still
+  // re-approve a higher one before commission starts being refused.
+  const capNearing =
+    !capFull && !!commission && commission.cap > 0 &&
+    commission.cap - commission.charged <= commission.warnThreshold;
+
+  // Both states are warnings and colour the card the same way. The BAR is not
+  // included: a nearly-full bar must not look identical to a spent one.
+  const capWarning = capFull || capNearing;
+
   // One colour for both bar segments and both swatch dots, so the figures above
   // the bar and the bar itself cannot drift apart.
   const barColor = capFull ? T.amberFg : T.purple;
@@ -428,8 +448,8 @@ export default function BillingPage() {
           <div
             className="hover-card"
             style={{
-              background:   capFull ? T.amberBg : "var(--p-color-bg-surface)",
-              border:       `0.5px solid ${capFull ? "#E0B15E" : "var(--p-color-border)"}`,
+              background:   capWarning ? T.amberBg : "var(--p-color-bg-surface)",
+              border:       `0.5px solid ${capWarning ? "#E0B15E" : "var(--p-color-border)"}`,
               borderRadius: "12px",
               padding:      "16px 20px",
             }}
@@ -499,6 +519,8 @@ export default function BillingPage() {
                   ? `⚠️ You've used your full ${formatMoney(commission.cap, commission.currency)} cap this month. The next successful charge will not be billed until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally.`
                   : capReachedByEstimate
                   ? `Charges still settling are expected to reach your ${formatMoney(commission.cap, commission.currency)} cap this month. Past it, no further commission can be charged until you re-approve a higher cap — your subscriptions keep billing normally.`
+                  : capNearing
+                  ? `⚠️ You're within ${formatMoney(commission.cap - commission.charged, commission.currency)} of your ${formatMoney(commission.cap, commission.currency)} monthly cap. Once it's reached, further commission can't be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally.`
                   : commission.pending > 0
                   ? `Charged automatically each time one of your subscriptions bills successfully. ${commission.pendingCount} charge${commission.pendingCount === 1 ? " is" : "s are"} still settling — pending amounts are estimates and are not billed until the charge succeeds.`
                   : "Charged automatically each time one of your subscriptions bills successfully. Pending is an estimate for charges still settling — it is never billed until the charge succeeds."}
