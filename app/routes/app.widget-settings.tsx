@@ -17,6 +17,7 @@ import {
   parseBenefitChips,
   serializeBenefitChips,
 } from "../config/widget-chips";
+import { syncWidgetMetafield } from "../lib/widget-metafield.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -65,7 +66,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 // ─── Action ───────────────────────────────────────────────────
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const form = await request.formData();
 
   // This upsert overwrites every widget column, so each one has to be present
@@ -84,6 +85,10 @@ export async function action({ request }: ActionFunctionArgs) {
     update: data,
     create: { shop: session.shop, ...data },
   });
+
+  // Into Shopify too: the theme block reads the shop-wide design and chips from
+  // there, so they show whichever server the store's app proxy reaches.
+  await syncWidgetMetafield(admin.graphql, session.shop);
 
   return json({ ok: true });
 }

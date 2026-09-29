@@ -9,17 +9,28 @@ import {
   SUBSCRIPTION_CONTRACT_QUERY,
   advanceBillingDate,
   applyContractToLocal,
+  contractAttribute,
+  contractLinesTotal,
   normaliseFrequency,
   normaliseStatus,
   toContractGid,
   upsertContractLocally,
 } from "../lib/subscription-sync.server";
+import {
+  PREPAID_CONTRACT_ATTRIBUTE,
+  invoiceIdFromOrderPayload,
+  markInvoicePaid,
+} from "../lib/prepaid.server";
 
 export async function action({ request }: ActionFunctionArgs) {
   const { topic, shop, payload, admin } = await authenticate.webhook(request);
 
   console.log(`[Webhook] ${topic} from ${shop}`);
-  console.log(`[Webhook] Raw payload:`, JSON.stringify(payload, null, 2));
+  // orders/paid fires for EVERY order in the shop, almost none of them ours, and
+  // each carries the customer's personal details. Not worth logging wholesale.
+  if (topic !== "ORDERS_PAID") {
+    console.log(`[Webhook] Raw payload:`, JSON.stringify(payload, null, 2));
+  }
 
   switch (topic) {
 
@@ -79,16 +90,33 @@ export async function action({ request }: ActionFunctionArgs) {
       };
       const { id: localSubId } = await upsertContractLocally(shop, merged);
 
-      // Only create initial billing attempt for brand new subscriptions
+      // A contract the app created itself from a paid prepaid invoice. That
+      // payment already has its attempt and commission, recorded by
+      // prepaid.server.ts against the real order; synthesizing another here
+      // would charge commission on it twice.
+      if (contractAttribute(contract, PREPAID_CONTRACT_ATTRIBUTE)) {
+        console.log(`[Webhook] ✅ Prepaid contract created by the app: ${contractId} — first payment already recorded`);
+        break;
+      }
+
+      // Only create initial billing attempt for brand new subscriptions.
+      // PENDING is ignored: a new PREPAID row already carries its payment hold
+      // (prepaid-hold.server.ts), which must not suppress this checkout order's
+      // record and commission. A new postpaid row never has a PENDING attempt.
       const existingAttempt = await prisma.billingAttempt.findFirst({
-        where: { subscriptionId: localSubId },
+        where: { subscriptionId: localSubId, status: { not: "PENDING" } },
       });
 
       if (!existingAttempt) {
+        // The stored price is the first line's per-unit price. A bundle
+        // contract has several lines, so the commission base uses them all.
+        const linesTotal  = contractLinesTotal(contract);
+        const chargedBase = linesTotal > 0 ? linesTotal : parseFloat(priceAmount);
+
         const initialAttempt = await prisma.billingAttempt.create({
           data: {
             subscriptionId: localSubId,
-            amount:         parseFloat(priceAmount),
+            amount:         chargedBase,
             status:         "SUCCESS",
           },
         });
@@ -103,7 +131,7 @@ export async function action({ request }: ActionFunctionArgs) {
         await chargeCommission({
           shop,
           admin,
-          subscription:     { id: localSubId, shop, price: parseFloat(priceAmount), shopifyContractId: contractId },
+          subscription:     { id: localSubId, shop, price: chargedBase, shopifyContractId: contractId },
           billingAttemptId: initialAttempt.id,
           contractGid:      contractId,
           orderGid:         null,
@@ -322,6 +350,32 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       console.log(`[Webhook] ❌ Billing failed: ${contractId} — ${errMsg}`);
+      break;
+    }
+
+    // ── Order paid: settles a prepaid payment link ────────────
+    // Only orders created from one of our prepaid draft orders carry the
+    // invoice attribute; every other order is ignored. markInvoicePaid checks
+    // the order really came from that invoice's draft order, since shoppers can
+    // set cart attributes on ordinary orders too.
+    case "ORDERS_PAID": {
+      const invoiceId = invoiceIdFromOrderPayload(payload);
+      if (!invoiceId) break;
+
+      if (!admin) {
+        // The hourly reconcile poll will settle it.
+        console.warn(`[Webhook] orders/paid for invoice ${invoiceId} with no admin client — leaving it to the reconcile cron`);
+        break;
+      }
+
+      const orderGid = (payload as any).admin_graphql_api_id as string;
+      const result   = await markInvoicePaid({
+        graphql:     admin.graphql,
+        invoiceId,
+        orderGid,
+        verifyOrder: true,
+      });
+      console.log(`[Webhook] orders/paid → invoice ${invoiceId}: ${result.detail}`);
       break;
     }
 

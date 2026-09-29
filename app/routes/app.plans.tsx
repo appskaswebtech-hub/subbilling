@@ -33,8 +33,19 @@ import {
   DEFAULT_BENEFIT_CHIPS,
   parseBenefitChips,
   serializeBenefitChips,
+  isDefaultBenefitChips,
 } from "../config/widget-chips";
 import { getFirstSellingPlanId } from "../shopify/sellingPlans.server";
+import { syncWidgetMetafield } from "../lib/widget-metafield.server";
+import {
+  PAYMENT_MODE_OPTIONS,
+  EMAIL_SENDER_OPTIONS,
+  PREPAID_SHOPPER_NOTE,
+  parsePaymentMode,
+  parseEmailSender,
+  type PaymentMode,
+  type EmailSender,
+} from "../config/payment";
 import dashboardStyles from "../styles/dashboard.css?url";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -88,6 +99,10 @@ type PlanGroup = {
   widgetPrimaryColor?: string;
   widgetBadgeColor?: string;
   widgetBorderRadius?: number | null;
+  /** "POSTPAID" | "PREPAID" — see app/config/payment.ts. */
+  paymentMode?: string;
+  /** "SHOPIFY" | "SMTP" — who sends a prepaid plan's payment email. */
+  paymentEmailSender?: string;
   productCount?: number;
   assigned?: AssignedProduct[];
 };
@@ -105,6 +120,8 @@ type PlanFormValues = {
   widgetPrimaryColor: string;
   widgetBadgeColor: string;
   widgetBorderRadius: string;
+  paymentMode: PaymentMode;
+  paymentEmailSender: EmailSender;
 };
 
 // Offered in the plan editor. "" inherits Settings → Widget designs; the rest
@@ -299,6 +316,8 @@ function defaultPlanFormValues(): PlanFormValues {
     widgetPrimaryColor: "",
     widgetBadgeColor: "",
     widgetBorderRadius: "",
+    paymentMode: "POSTPAID",
+    paymentEmailSender: "SHOPIFY",
   };
 }
 
@@ -361,7 +380,10 @@ function parsePlanForm(formData: FormData) {
   if (discountType === "fixed_amount" && (Number.isNaN(discount) || discount < 0))
     return { error: "Fixed discount must be 0 or greater." };
 
-  return { name, interval, intervalCount, discount, discountType };
+  const paymentMode        = parsePaymentMode(formData.get("paymentMode"));
+  const paymentEmailSender = parseEmailSender(formData.get("paymentEmailSender"));
+
+  return { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender };
 }
 
 function buildSellingPlanPayload({
@@ -370,12 +392,14 @@ function buildSellingPlanPayload({
   intervalCount,
   discount,
   discountType,
+  paymentMode,
 }: {
   name: string;
   interval: string;
   intervalCount: number;
   discount: number;
   discountType: string;
+  paymentMode: PaymentMode;
 }) {
   const optionLabel = formatIntervalLabel(interval, intervalCount);
   const discountLabel =
@@ -411,6 +435,10 @@ function buildSellingPlanPayload({
     billingPolicy: { recurring: { interval, intervalCount } },
     deliveryPolicy: { recurring: { interval, intervalCount } },
     pricingPolicies,
+    // Shown to shoppers under the plan, so a prepaid subscriber knows up front
+    // that renewals come as a payment email rather than an automatic charge.
+    // "" rather than omitted, so switching a plan back to postpaid clears it.
+    description: paymentMode === "PREPAID" ? PREPAID_SHOPPER_NOTE : "",
   };
 
   return {
@@ -584,6 +612,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }),
   );
 
+  // Keep the widget config stored in Shopify in step with this database, so the
+  // theme block shows every plan's chips and design even when the store's app
+  // proxy reaches a different server. After the backfill above, which may have
+  // just given plans the id they are keyed by. Writes only when something
+  // differs, and never fails the page.
+  await syncWidgetMetafield(admin.graphql, session.shop);
+
   // ── Subscription metrics (live stats for the header) ──
   const activeSubscriptions = await prisma.subscription.findMany({
     where: { shop: session.shop, status: "ACTIVE" },
@@ -666,7 +701,11 @@ export async function action({ request }: ActionFunctionArgs) {
   // chips only mean anything under the "benefits" design but are stored either
   // way, so switching design back and forth does not lose the merchant's text.
   const widgetDesign       = ((formData.get("widgetDesign") as string) || "").trim();
-  const widgetBenefitChips = serializeBenefitChips(formData.getAll("benefitChip") as string[]);
+  // The editor opens every plan on the default chips. Saving those back unchanged
+  // must NOT become this plan's own chips: that overrode the shop-wide chips from
+  // Widget Settings on every plan. Untouched defaults are stored as "" (inherit).
+  const postedChips        = formData.getAll("benefitChip") as string[];
+  const widgetBenefitChips = isDefaultBenefitChips(postedChips) ? "" : serializeBenefitChips(postedChips);
   // Colours follow the same "" = inherit rule. Anything that is not a valid
   // 6-digit hex is stored as "" rather than rejected: the value lands in a CSS
   // custom property on the storefront, so a malformed one would silently break
@@ -710,13 +749,14 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const { name, interval, intervalCount, discount, discountType } = parsed;
+    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender } = parsed;
     const { groupInput, sellingPlanInput } = buildSellingPlanPayload({
       name,
       interval,
       intervalCount,
       discount,
       discountType,
+      paymentMode,
     });
     const { pricingPolicies, ...sellingPlanWithoutPolicies } = sellingPlanInput;
 
@@ -800,8 +840,13 @@ export async function action({ request }: ActionFunctionArgs) {
         widgetPrimaryColor,
         widgetBadgeColor,
         widgetBorderRadius,
+        paymentMode,
+        paymentEmailSender,
       },
     });
+
+    // Into Shopify too, so the theme block has this plan's appearance at once.
+    await syncWidgetMetafield(admin.graphql, session.shop);
 
     return json({ ok: true, error: null, intent: "create" });
   }
@@ -828,13 +873,14 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const { name, interval, intervalCount, discount, discountType } = parsed;
+    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender } = parsed;
     const { groupInput, sellingPlanInput } = buildSellingPlanPayload({
       name,
       interval,
       intervalCount,
       discount,
       discountType,
+      paymentMode,
     });
 
     // Hoisted so the local write below can persist it: this is the storefront's
@@ -930,11 +976,20 @@ export async function action({ request }: ActionFunctionArgs) {
         widgetPrimaryColor,
         widgetBadgeColor,
         widgetBorderRadius,
+        // Applies to NEW subscribers only: each Subscription copies the mode when
+        // it is created (subscription-sync.server.ts), so existing ones keep
+        // being billed the way they signed up for.
+        paymentMode,
+        paymentEmailSender,
         // Only when resolved — a group with no Shopify counterpart must not have
         // an existing key overwritten with null.
         ...(sellingPlanId ? { shopifySellingPlanId: sellingPlanId } : {}),
       },
     });
+
+    // The theme block reads chips, design and colours from Shopify, so the
+    // edit shows on the storefront whichever server the app proxy reaches.
+    await syncWidgetMetafield(admin.graphql, session.shop);
 
     return json({ ok: true, error: null, intent: "update" });
   }
@@ -1148,6 +1203,9 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
     await prisma.sellingPlanGroup.delete({ where: { id } });
+    await syncWidgetMetafield(admin.graphql, session.shop, {
+      removedPlanIds: group?.shopifySellingPlanId ? [group.shopifySellingPlanId] : [],
+    });
     return json({ ok: true, error: null, intent: "delete" });
   }
 
@@ -1160,7 +1218,13 @@ export async function action({ request }: ActionFunctionArgs) {
   // it cannot manage.
   if (intent === "forget") {
     const id = formData.get("id") as string;
+    const forgotten = await prisma.sellingPlanGroup.findFirst({
+      where: { id, shop: session.shop }, select: { shopifySellingPlanId: true },
+    });
     await prisma.sellingPlanGroup.deleteMany({ where: { id, shop: session.shop } });
+    await syncWidgetMetafield(admin.graphql, session.shop, {
+      removedPlanIds: forgotten?.shopifySellingPlanId ? [forgotten.shopifySellingPlanId] : [],
+    });
     return json({ ok: true, error: null, intent: "forget" });
   }
 
@@ -1380,6 +1444,9 @@ function PlanCard({
               {intervalLabel}
               {plan.discount > 0
                 ? ` · ${plan.discountType === "fixed_amount" ? `${plan.discount} off` : `${plan.discount}% off`}`
+                : ""}
+              {plan.paymentMode === "PREPAID"
+                ? ` · Prepaid (${plan.paymentEmailSender === "SMTP" ? "your email server" : "Shopify invoice"})`
                 : ""}
             </Text>
           </div>
@@ -2423,6 +2490,15 @@ export default function Plans() {
   const [widgetBorderRadius, setWidgetBorderRadius] = useState(
     defaultPlanFormValues().widgetBorderRadius,
   );
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>(
+    defaultPlanFormValues().paymentMode,
+  );
+  const [paymentEmailSender, setPaymentEmailSender] = useState<EmailSender>(
+    defaultPlanFormValues().paymentEmailSender,
+  );
+  // The mode the plan had when the editor opened, so the "applies to new
+  // subscribers only" note appears only when the merchant actually changes it.
+  const [openedPaymentMode, setOpenedPaymentMode] = useState<PaymentMode>("POSTPAID");
 
   // ── Product picker modal state ──
   const [productPickerOpen, setProductPickerOpen] = useState(false);
@@ -2696,6 +2772,8 @@ export default function Plans() {
     fd.append("widgetPrimaryColor", widgetPrimaryColor.trim());
     fd.append("widgetBadgeColor", widgetBadgeColor.trim());
     fd.append("widgetBorderRadius", widgetBorderRadius.trim());
+    fd.append("paymentMode", paymentMode);
+    fd.append("paymentEmailSender", paymentEmailSender);
     submit(fd, { method: "post" });
   }
 
@@ -2713,6 +2791,9 @@ export default function Plans() {
     setWidgetPrimaryColor(defaults.widgetPrimaryColor);
     setWidgetBadgeColor(defaults.widgetBadgeColor);
     setWidgetBorderRadius(defaults.widgetBorderRadius);
+    setPaymentMode(defaults.paymentMode);
+    setPaymentEmailSender(defaults.paymentEmailSender);
+    setOpenedPaymentMode(defaults.paymentMode);
     setEditorOpen(true);
   }
 
@@ -2734,6 +2815,10 @@ export default function Plans() {
     setWidgetBorderRadius(
       typeof plan.widgetBorderRadius === "number" ? String(plan.widgetBorderRadius) : "",
     );
+    const mode = parsePaymentMode(plan.paymentMode);
+    setPaymentMode(mode);
+    setOpenedPaymentMode(mode);
+    setPaymentEmailSender(parseEmailSender(plan.paymentEmailSender));
     setEditorOpen(true);
   }
 
@@ -3353,6 +3438,38 @@ export default function Plans() {
                 suffix={discountType === "percentage" ? "%" : undefined}
                 helpText="Set to 0 for no discount"
               />
+
+              <Select
+                label="Payment type"
+                options={PAYMENT_MODE_OPTIONS}
+                value={paymentMode}
+                onChange={(v) => setPaymentMode(parsePaymentMode(v))}
+                helpText={
+                  paymentMode === "PREPAID"
+                    ? "Nothing is charged automatically. Before each cycle the customer gets a link to confirm and pay, and the order ships once they pay."
+                    : "The customer's saved card is charged automatically each cycle."
+                }
+              />
+              {paymentMode === "PREPAID" && (
+                <Select
+                  label="Payment email sent by"
+                  options={EMAIL_SENDER_OPTIONS}
+                  value={paymentEmailSender}
+                  onChange={(v) => setPaymentEmailSender(parseEmailSender(v))}
+                  helpText={
+                    paymentEmailSender === "SMTP"
+                      ? "Sent from the email server set up in Settings → Prepaid & email. If it isn't set up, the Shopify invoice email is used instead."
+                      : "Shopify emails its own invoice with a secure checkout link."
+                  }
+                />
+              )}
+              {editingPlanId && paymentMode !== openedPaymentMode && (
+                <Banner tone="info">
+                  <Text as="p">
+                    Only new subscribers are affected. Existing subscriptions on this plan keep being billed the way they signed up.
+                  </Text>
+                </Banner>
+              )}
 
               <Select
                 label="Widget design"

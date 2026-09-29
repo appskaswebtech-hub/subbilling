@@ -208,6 +208,27 @@
     }
   }
 
+  // The configuration the app stores in Shopify itself, rendered by Liquid into
+  // data-app-config (see subscription-options.liquid). It is the AUTHORITATIVE
+  // source: it holds whatever the app last saved, while the proxy answer comes
+  // from whichever single server the store's app proxy reaches. A plan saved
+  // through the app always has an entry here, even when that server has never
+  // heard of it.
+  //
+  // Parsed once per widget. Anything unusable — no metafield yet ("null"), an
+  // older app, malformed JSON — reads as empty, and the proxy answer stands.
+  function appConfig(widget) {
+    if (widget.__subAppConfig) return widget.__subAppConfig;
+    let cfg = null;
+    try { cfg = JSON.parse(widget.dataset.appConfig || 'null'); } catch (e) { cfg = null; }
+    const ok = cfg && typeof cfg === 'object';
+    widget.__subAppConfig = {
+      shop:  ok && cfg.shop  && typeof cfg.shop  === 'object' ? cfg.shop  : {},
+      plans: ok && cfg.plans && typeof cfg.plans === 'object' ? cfg.plans : {},
+    };
+    return widget.__subAppConfig;
+  }
+
   // The app stores full GIDs while Liquid emits bare numeric ids. Normalising
   // both sides means a mismatch cannot silently resolve to "no override".
   function bareId(value) {
@@ -223,9 +244,14 @@
   // because a miss reads as "this plan overrides nothing", the entire per-plan
   // feature was silently inert. `plan.id` is numeric on both sides; it is the
   // same value the cart posts as `selling_plan`.
+  //
+  // The entry stored in Shopify (appConfig) wins outright when there is one: it
+  // is the plan as the app last saved it. The proxy's map is the fallback for
+  // plans saved before the app started storing them.
   function planOverride(widget, card) {
     if (!card) return null;
-    return planWidgetMap(widget)[bareId(card.dataset.planId)] || null;
+    const id = bareId(card.dataset.planId);
+    return appConfig(widget).plans[id] || planWidgetMap(widget)[id] || null;
   }
 
   // ── Untracked plans ─────────────────────────────────────────
@@ -245,7 +271,12 @@
   function isTrackedCard(widget, card) {
     const known = widget.__subKnownPlans;
     if (!known) return true;   // filtering off → every card passes
-    return known.indexOf(bareId(card.dataset.planId)) !== -1;
+    const id = bareId(card.dataset.planId);
+    // A plan the app stored in Shopify is tracked by definition, even if the
+    // server behind the proxy (another environment, another database) has never
+    // heard of it. Hiding it was how a freshly saved plan vanished from the store.
+    if (Object.prototype.hasOwnProperty.call(appConfig(widget).plans, id)) return true;
+    return known.indexOf(id) !== -1;
   }
 
   // Settings arrive after initWidget has already run applyVariantPlans, so this
@@ -597,6 +628,11 @@
     const shopChips = readChips(widget.dataset.benefitChips);
     if (shopChips.length) chips = shopChips;
 
+    // Shop-wide chips as stored in Shopify beat the proxy's, which always sends
+    // a list (the defaults when its own database has none).
+    const storedShopChips = appConfig(widget).shop.chips;
+    if (Array.isArray(storedShopChips) && storedShopChips.length) chips = storedShopChips;
+
     const own = planOverride(widget, shownCard);
     if (own && Array.isArray(own.chips) && own.chips.length) chips = own.chips;
 
@@ -635,7 +671,7 @@
   // window.__subWidget so "is the new code actually live?" is one console line
   // rather than a round of screenshots — the theme asset is CDN-cached and a
   // deploy is easy to believe has landed when it has not.
-  const WIDGET_BUILD = '2026-08-22.hide-untracked-plans';
+  const WIDGET_BUILD = '2026-09-28.config-from-shopify';
 
   // The payload shape this build needs. A server running older code answers 200
   // with a silently smaller object — indistinguishable from success unless we
@@ -651,21 +687,28 @@
   const SETTINGS_URL = '/apps/subscriptions/widget-settings';
 
   function applySettings(widget, s) {
+    // Shop-wide values stored in Shopify (appConfig) win over the proxy's, for
+    // the same reason plan entries do: they are what the app last saved.
+    const stored = appConfig(widget).shop;
+
     // Kept so per-plan colours have something to fall BACK to. A plan colour
     // layers on top of these, and when the shopper moves to a plan that
     // overrides nothing they have to be restorable.
     widget.__subShopColors = {
-      primaryColor: s.primaryColor || '',
-      badgeColor:   s.badgeColor   || '',
-      borderRadius: (s.borderRadius === undefined || s.borderRadius === null)
-        ? null
-        : s.borderRadius,
+      primaryColor: stored.primaryColor || s.primaryColor || '',
+      badgeColor:   stored.badgeColor   || s.badgeColor   || '',
+      borderRadius: typeof stored.borderRadius === 'number'
+        ? stored.borderRadius
+        : (s.borderRadius === undefined || s.borderRadius === null)
+          ? null
+          : s.borderRadius,
     };
 
     // The one-time option is the first .sub-option and is the only one without
     // a plan id. Hidden rather than removed so the rest of the widget's logic
     // (which resets to one-time on variant change) still finds it.
-    if (s.showOnetime === false) {
+    const showOnetime = typeof stored.showOnetime === 'boolean' ? stored.showOnetime : s.showOnetime;
+    if (showOnetime === false) {
       const onetime = widget.querySelector('.sub-option:not([data-plan-id])');
       if (onetime) onetime.style.display = 'none';
     }
@@ -697,7 +740,8 @@
     // Liquid rendered; when the app is unreachable the markup's design stands,
     // which is why colours have always worked while the design did not —
     // colours had no such fallback to lose.
-    if (s.design) widget.dataset.shopDesign = s.design;
+    const shopDesign = stored.design || s.design;
+    if (shopDesign) widget.dataset.shopDesign = shopDesign;
     applyDesign(widget);
 
     // Keep the collapsed row's selected state in step when the shopper picks
@@ -739,6 +783,7 @@
     let sourceLine   = '(none)';
     let overrideLine = '(none)';
     let trackedLine  = '(no widget)';
+    let storedLine   = '(no widget)';
     if (w) {
       // The lookup KEY, spelled out. When overrides mysteriously do nothing, the
       // only question worth asking is whether this value appears in the list of
@@ -755,6 +800,12 @@
 
       const keys = Object.keys(planWidgetMap(w));
       overrideLine = keys.length ? keys.join(', ') : '(none)';
+
+      // What the app stored in Shopify, which wins over the proxy per plan.
+      const storedKeys = Object.keys(appConfig(w).plans);
+      storedLine = storedKeys.length
+        ? storedKeys.length + ' plan(s): ' + storedKeys.join(', ')
+        : '(none — open Subscription Plans in the app to store it)';
 
       const known = w.__subKnownPlans;
       if (!Array.isArray(known)) {
@@ -782,6 +833,7 @@
       'design from    : ' + sourceLine + '\n' +
       'lookup key     : ' + selectedLine + '\n' +
       'override keys  : ' + overrideLine + '\n' +
+      'app config     : ' + storedLine + '\n' +
       'tracked plans  : ' + trackedLine + '\n' +
       'widget gate    : ' + (revealed ? 'revealed' : 'PENDING (hidden)') + '\n' +
       'frequency row  : ' + (document.querySelector('.sub-arctic') ? 'built' : 'not built');
@@ -957,6 +1009,19 @@
     // rather than the shop default. Mirrors how data-theme-chips works.
     if (widget.dataset.themeDesign === undefined) {
       widget.dataset.themeDesign = widget.dataset.design || '';
+    }
+
+    // The configuration stored in Shopify is already on the page, so the shop's
+    // design and colours apply from first paint and survive an unreachable app
+    // proxy. applySettings refines them once the proxy answers.
+    const stored = appConfig(widget).shop;
+    if (stored.design) widget.dataset.shopDesign = stored.design;
+    if (stored.primaryColor || stored.badgeColor || typeof stored.borderRadius === 'number') {
+      widget.__subShopColors = {
+        primaryColor: stored.primaryColor || '',
+        badgeColor:   stored.badgeColor   || '',
+        borderRadius: typeof stored.borderRadius === 'number' ? stored.borderRadius : null,
+      };
     }
 
     radios.forEach((radio) => {

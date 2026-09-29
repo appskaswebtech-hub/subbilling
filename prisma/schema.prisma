@@ -60,6 +60,18 @@ model SellingPlanGroup {
   // column has no spare value to mean "unset".
   widgetBorderRadius Int?
 
+  // ── Payment ─────────────────────────────────────────────────
+  // "POSTPAID": the cron charges the customer's saved card each cycle.
+  // "PREPAID":  before each cycle the customer is emailed a link to confirm and
+  //             pay, and the cycle ships only once they do (app/lib/prepaid.server.ts).
+  // Copied onto each Subscription when it is created, so changing it affects new
+  // subscribers only.
+  paymentMode        String @default("POSTPAID")
+  // Who sends a prepaid plan's payment email: "SHOPIFY" (draft order invoice) or
+  // "SMTP" (the merchant's own server, configured in AppSettings). Read at send
+  // time, so a change applies to the next email.
+  paymentEmailSender String @default("SHOPIFY")
+
   // ── Leftover: unused ────────────────────────────────────────
   // Added for a custom per-cycle billing schedule whose code was later reverted.
   // The column is still in the database, so it is declared here to keep schema
@@ -85,16 +97,28 @@ model Subscription {
   frequency         String
   nextBillingDate   DateTime
 
+  // Selling plan GID of the contract's first line, set when the row is created.
+  // It is how a subscription finds its plan (or bundle) again, e.g. for the
+  // prepaid email sender.
+  sellingPlanId     String?
+
+  // "POSTPAID" | "PREPAID", copied from the plan or bundle at creation — see
+  // SellingPlanGroup.paymentMode. The billing cron charges POSTPAID rows; PREPAID
+  // rows are invoiced by email instead.
+  paymentMode       String   @default("POSTPAID")
+  // ProductBundle.id when the contract came from a recurring bundle.
+  bundleId          String?
+
   // ── Leftover: unused ──────────────────────────────────────
   // Same reverted billing-schedule feature as SellingPlanGroup.customSchedule.
-  // Declared only so schema and database agree; nothing reads either column.
-  sellingPlanId     String?
+  // Declared only so schema and database agree; nothing reads it.
   scheduleIndex     Int      @default(0)
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   billingAttempts   BillingAttempt[]
+  prepaidInvoices   PrepaidInvoice[]
 
   @@index([shop])
   @@index([status])
@@ -142,6 +166,41 @@ model AppSettings {
   // "{discount}" is substituted with the plan's discount when rendered.
   // Wider than Prisma's default VarChar(191): six chips joined can exceed it.
   widgetBenefitChips    String   @default("") @db.VarChar(1000)
+
+  // ── Prepaid payments ────────────────────────────────────────
+  // How long a payment link stays open. A reminder goes out halfway through; an
+  // unpaid renewal is paused when it ends.
+  prepaidPayWindowDays   Int     @default(7)
+  // How many days before the billing date the payment link is sent, so the
+  // customer can pay before the cycle is due.
+  prepaidInvoiceLeadDays Int     @default(3)
+
+  // Merchant's own wording for the payment emails. Empty (or null) = the
+  // built-in text in app/config/payment.ts (PREPAID_EMAIL_DEFAULTS). Supports
+  // the placeholders listed there, e.g. {subscription} and {due_date}.
+  prepaidInitialSubject  String  @default("")
+  prepaidRenewalSubject  String  @default("")
+  prepaidReminderSubject String  @default("")
+  // Nullable rather than @default(""): MySQL cannot give a TEXT column a default.
+  prepaidInitialMessage  String? @db.Text
+  prepaidRenewalMessage  String? @db.Text
+  prepaidReminderMessage String? @db.Text
+
+  // ── Merchant SMTP ───────────────────────────────────────────
+  // Used by prepaid plans whose paymentEmailSender is "SMTP". The password is
+  // stored ONLY as AES-GCM ciphertext (app/lib/secret-box.server.ts) and is never
+  // sent back to the browser.
+  smtpHost              String   @default("")
+  smtpPort              Int      @default(587)
+  smtpSecure            Boolean  @default(false)   // true = implicit TLS (usually port 465)
+  smtpUser              String   @default("")
+  // Nullable rather than @default(""): MySQL cannot give a TEXT column a default.
+  smtpPassEnc           String?  @db.Text
+  smtpFrom              String   @default("")
+
+  // Automatic app discount that prices one-time bundles (extensions/bundle-discount).
+  // Created with the shop's first one-time bundle.
+  bundleDiscountId      String?
 
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -193,6 +252,153 @@ model CommissionCharge {
 
   @@index([shop])
   @@index([shop, createdAt])
+}
+
+// ─── Prepaid invoices ─────────────────────────────────────────────────────────
+// One "confirm and pay" request: a Shopify draft order plus the email that
+// carries its link. See app/lib/prepaid.server.ts.
+//
+//   INITIAL  a merchant set up a prepaid subscription for a customer. There is
+//            no contract yet; `setupJson` holds what is needed to create one
+//            once the customer pays.
+//   RENEWAL  the next cycle of an existing prepaid subscription.
+model PrepaidInvoice {
+  id             String        @id @default(cuid())
+  shop           String
+  kind           String                               // "INITIAL" | "RENEWAL"
+  // Null for an INITIAL invoice until its payment creates the contract.
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  // Null only between the row being claimed and the draft order being created.
+  draftOrderId   String?       @unique
+  invoiceUrl     String?       @db.Text
+  orderId        String?                              // Order GID once paid
+  amount         Float         @default(0)
+  currency       String        @default("USD")
+  // The billing date this invoice pays for. With subscriptionId it is the
+  // idempotency key: a cycle can be invoiced only once.
+  cycleDate      DateTime
+  sender         String        @default("SHOPIFY")    // "SHOPIFY" | "SMTP" — what was actually used
+  // "CREATING" | "SENT" | "PAID" | "EXPIRED" | "CANCELLED" | "FAILED"
+  status         String        @default("CREATING")
+  sentAt         DateTime?
+  reminderSentAt DateTime?
+  dueAt          DateTime?
+  paidAt         DateTime?
+  error          String?       @db.Text
+  setupJson      String?       @db.Text
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([subscriptionId, cycleDate])
+  @@index([shop, status])
+  @@index([status])
+}
+
+// ─── Product bundles ──────────────────────────────────────────────────────────
+// A fixed set of products the merchant sells together at a discount, offered on
+// the page of every product in it.
+//
+//   RECURRING  every line goes in the cart with the bundle's OWN selling plan,
+//              so they all land on one contract and renew together. That plan
+//              lives in a hidden selling plan group (appId "kas-bundle") whose
+//              pricing policy IS the bundle discount, so renewals keep it.
+//   ONE_TIME   plain lines without a selling plan, discounted at checkout by the
+//              bundle-discount function: every item the shopper kept ticked.
+//
+// Named ProductBundle rather than Bundle: an earlier, removed feature left
+// `Bundle`/`BundleItem` tables behind in some databases.
+model ProductBundle {
+  id                 String   @id @default(cuid())
+  shop               String
+  name               String
+  // Product GID of the bundle's lead product (its first item), used for its
+  // name and image in lists. The storefront shows the bundle on every item's page.
+  mainProductId      String
+  type               String   @default("RECURRING")   // "RECURRING" | "ONE_TIME"
+  discountPercent    Float    @default(0)
+  active             Boolean  @default(true)
+  position           Int      @default(0)
+  // Storefront theme: "classic" | "together" | "compact" | "savings"
+  // (extensions/subscription/assets/bundle-offer.js, app/components/BundlePreview.tsx).
+  design             String   @default("classic")
+  // Which product pages show the bundle:
+  //   "ITEMS"  the page of every product in it (the original behaviour)
+  //   "BASE"   only the pages of its base products (baseProducts below)
+  showOn             String   @default("ITEMS")
+
+  // ── Kind and pricing (app/config/bundle-pricing.ts) ─────────
+  //   kind "SET"  a fixed set; shoppers can untick items.
+  //        "BOX"  build-your-own: the shopper picks at least minItems units
+  //               from the items (the pool), repeats allowed.
+  kind               String   @default("SET")
+  //   "PERCENT"      discountPercent off every ticked item
+  //   "FIXED_PRICE"  fixedPrice for the full set (sets only). discountPercent
+  //                  then holds the matching percentage, recomputed on save
+  //                  from current prices: what recurring bundles and partial
+  //                  sets use, since a selling plan can't hold a total.
+  //   "TIERED"       the percentage grows with ticked units (tiersJson)
+  pricingMode        String   @default("PERCENT")
+  fixedPrice         Float?
+  minItems           Int      @default(0)
+  // [{ minItems, percent, sellingPlanId? }] ascending. sellingPlanId is the
+  // tier's own selling plan on recurring bundles, set by the plan sync.
+  tiersJson          String?  @db.Text
+
+  // ── RECURRING only ─────────────────────────────────────────
+  interval           String   @default("MONTH")       // DAY | WEEK | MONTH | YEAR
+  intervalCount      Int      @default(1)
+  paymentMode        String   @default("POSTPAID")    // see SellingPlanGroup.paymentMode
+  paymentEmailSender String   @default("SHOPIFY")
+  shopifyGroupId       String?
+  shopifySellingPlanId String?
+
+  items              ProductBundleItem[]
+  baseProducts       ProductBundleBase[]
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([shop])
+  @@index([shop, mainProductId])
+}
+
+model ProductBundleItem {
+  id        String        @id @default(cuid())
+  bundleId  String
+  bundle    ProductBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  productId String        // product GID — what the bundle's selling plan group attaches to
+  variantId String        // variant GID — what goes in the cart
+  // Kept so the storefront can fetch live price and image from
+  // /products/<handle>.js instead of trusting a stored price that goes stale.
+  handle    String
+  title     String
+  quantity  Int           @default(1)
+  // true: the shopper picks size/colour on the storefront and any variant of
+  // the product counts; variantId is only the default (and what a merchant-
+  // created prepaid subscription uses). false: exactly this variant.
+  variantChoice Boolean   @default(false)
+
+  @@index([bundleId])
+  // The storefront lookup: a bundle is offered on the page of every product in it.
+  @@index([productId])
+}
+
+// A product whose page shows the bundle when its showOn is "BASE". It doesn't
+// have to be in the bundle and is never added to the cart with it: a "wax +
+// leash" bundle can be offered on every snowboard's page.
+model ProductBundleBase {
+  id        String        @id @default(cuid())
+  bundleId  String
+  bundle    ProductBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  productId String        // product GID
+  handle    String
+  title     String
+
+  @@index([bundleId])
+  // The storefront lookup for "BASE" bundles.
+  @@index([productId])
 }
 
 // ─── Public API Key ───────────────────────────────────────────────────────────

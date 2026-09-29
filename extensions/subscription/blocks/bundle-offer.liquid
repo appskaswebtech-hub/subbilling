@@ -1,0 +1,215 @@
+{%- comment -%}
+  Product bundles offered on this product's page.
+
+  Bundles are set up in the app (Bundles page) and fetched through the app proxy,
+  so the theme never needs the app's URL. A product can be in several bundles;
+  each renders as its own card. Nothing renders when the product is in none.
+
+  Recurring bundles add every item on the bundle's own selling plan, so they
+  renew together on one subscription. One-time bundles add plain lines that the
+  app's bundle discount prices at checkout. Every line carries the hidden
+  `_kas_bundle` property naming its bundle.
+
+  Each bundle renders in the theme chosen for it in the app: classic, together
+  ("bought together" tiles), compact (one slim bar) or savings (ribbon card).
+  The app's live preview (app/components/BundlePreview.tsx) mirrors these
+  styles; keep the two in step. Products where the shopper picks size/colour
+  get a dropdown per item. Build-your-own boxes have one layout of their own:
+  a grid of products with − / + steppers and a "pick at least N" bar. Tiered
+  bundles show a ladder of their tiers and what the next one saves.
+
+  data-app-bundles holds the shop's bundles as the app stored them IN SHOPIFY,
+  on its own installation (app/lib/bundle-metafield.server.ts). It is read at
+  render time, so bundles show without calling the app proxy, which a store
+  may route to another app or not at all. It is "null" until the app has
+  synced once; until then the block falls back to the proxy.
+{%- endcomment -%}
+
+<div
+  class="kas-bundles"
+  id="kas-bundles-{{ block.id }}"
+  data-product-id="{{ product.id }}"
+  data-shop="{{ shop.permanent_domain }}"
+  data-money-format="{{ shop.money_format | escape }}"
+  data-root="{{ routes.root_url }}"
+  data-heading="{{ block.settings.heading | escape }}"
+  data-button="{{ block.settings.button_label | escape }}"
+  data-after-add="{{ block.settings.after_add }}"
+  data-app-bundles="{{ app.metafields.kas_bundles.config.value | json | escape }}"
+  style="--kas-bundle-accent: {{ block.settings.accent_color }};"
+  hidden
+></div>
+
+<style>
+  .kas-bundles { margin: 16px 0; display: grid; gap: 12px; }
+  .kas-bundles__heading { font-weight: 600; font-size: 15px; margin: 0; }
+  .kas-bundle { border: 1px solid rgba(0,0,0,.12); border-radius: 10px; padding: 14px 16px; background: #fff; color: inherit; }
+  .kas-bundle__head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .kas-bundle__title { font-weight: 600; font-size: 15px; margin: 0; }
+  .kas-bundle__badge { font-size: 12px; font-weight: 600; color: #fff; background: var(--kas-bundle-accent); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+  .kas-bundle__items { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 8px; }
+  .kas-bundle__item { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .kas-bundle__img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: rgba(0,0,0,.05); flex-shrink: 0; }
+  .kas-bundle__name { flex: 1; min-width: 0; }
+  .kas-bundle__variant { font-size: 12px; opacity: .7; }
+  .kas-bundle__select { display: block; margin-top: 4px; max-width: 100%; font-size: 12px; padding: 3px 6px; border: 1px solid rgba(0,0,0,.2); border-radius: 6px; background: #fff; color: inherit; }
+  .kas-bundle__qty { opacity: .7; }
+  .kas-bundle__meta { font-size: 13px; opacity: .8; margin: 0 0 10px; }
+  .kas-bundle__total { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; font-size: 15px; }
+  .kas-bundle__was { text-decoration: line-through; opacity: .6; font-size: 13px; }
+  .kas-bundle__now { font-weight: 700; }
+  .kas-bundle__save { font-size: 12px; font-weight: 600; color: var(--kas-bundle-accent); }
+  .kas-bundle__button { width: 100%; border: 0; border-radius: 8px; padding: 11px 14px; font-weight: 600; cursor: pointer; color: #fff; background: var(--kas-bundle-accent); }
+  .kas-bundle__button[disabled] { opacity: .55; cursor: not-allowed; }
+  .kas-bundle__error { color: #b42318; font-size: 13px; margin: 8px 0 0; }
+
+  /* ── Tick / untick an item ──
+     Themes often style input[type="checkbox"] themselves (hidden, restyled or
+     zero-width), and that selector outranks a single class. These rules are
+     scoped to the block and pin the properties themes override, so the ticks
+     look the same on every theme. */
+  .kas-bundles input.kas-bundle__toggle {
+    -webkit-appearance: auto !important; appearance: auto !important;
+    display: inline-block !important; position: static !important;
+    width: 18px !important; height: 18px !important; min-width: 18px !important; min-height: 18px !important;
+    max-width: none !important; margin: 0 !important; padding: 0 !important;
+    opacity: 1 !important; visibility: visible !important; clip: auto !important; clip-path: none !important;
+    flex-shrink: 0; cursor: pointer; accent-color: var(--kas-bundle-accent);
+  }
+  .kas-bundles input.kas-bundle__toggle:focus-visible { outline: 2px solid var(--kas-bundle-accent); outline-offset: 2px; }
+  /* An unticked item fades, but its tick stays fully visible so it's clear how to add it back. */
+  .kas-bundle__off .kas-bundle__img, .kas-bundle__off .kas-bundle__name, .kas-bundle__off .kas-bundle__qty,
+  .kas-bundle__off .kas-bundle__tile-name, .kas-bundle__off .kas-bundle__tile-price, .kas-bundle__off .kas-bundle__select,
+  .kas-bundle__img.kas-bundle__off { opacity: .45; }
+  .kas-bundle__off .kas-bundle__name { text-decoration: line-through; }
+  .kas-bundle__tile-media { position: relative; display: inline-block; }
+  .kas-bundles .kas-bundle__tile-media input.kas-bundle__toggle { position: absolute !important; top: 6px; left: 6px; background: #fff; border-radius: 4px; }
+
+  /* ── Bought together ── */
+  .kas-bundle--together { border-radius: 12px; padding: 16px; }
+  .kas-bundle--together .kas-bundle__title { font-weight: 700; margin-bottom: 12px; }
+  .kas-bundle__tiles { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
+  .kas-bundle__tile { width: 96px; font-size: 12px; line-height: 1.3; }
+  .kas-bundle__tile .kas-bundle__img { width: 88px; height: 88px; border-radius: 10px; }
+  .kas-bundle__tile-name { margin-top: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .kas-bundle__tile-price { opacity: .7; margin-top: 2px; }
+  .kas-bundle__plus { width: 24px; height: 24px; border-radius: 50%; background: rgba(0,0,0,.06); display: flex; align-items: center; justify-content: center; font-weight: 700; margin-top: 32px; flex-shrink: 0; }
+
+  /* ── Compact bar ── */
+  .kas-bundle--compact { border-radius: 999px; padding: 8px 8px 8px 12px; }
+  .kas-bundle__bar { display: flex; align-items: center; gap: 10px; }
+  .kas-bundle__stack { display: flex; flex-shrink: 0; }
+  .kas-bundle__stack .kas-bundle__img, .kas-bundle__more { width: 36px; height: 36px; border-radius: 50%; border: 2px solid #fff; box-sizing: border-box; }
+  .kas-bundle__stack > * + * { margin-left: -10px; }
+  .kas-bundle__more { background: rgba(0,0,0,.08); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; }
+  .kas-bundle__summary { flex: 1; min-width: 0; }
+  .kas-bundle__summary .kas-bundle__title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kas-bundle__sub { font-size: 12px; opacity: .7; }
+  .kas-bundle__price-stack { text-align: right; flex-shrink: 0; }
+  .kas-bundle__price-stack .kas-bundle__was { display: block; font-size: 11px; }
+  .kas-bundle--compact .kas-bundle__button { width: auto; border-radius: 999px; padding: 8px 16px; font-size: 13px; }
+  .kas-bundle__options { margin: 6px 0 0 6px; font-size: 12px; }
+  .kas-bundle__options summary { cursor: pointer; color: var(--kas-bundle-accent); font-weight: 600; }
+  .kas-bundle__options .kas-bundle__item { margin-top: 6px; font-size: 12px; }
+  .kas-bundle--compact:has(.kas-bundle__options[open]) { border-radius: 16px; }
+
+  /* ── Savings card ── */
+  .kas-bundle--savings { padding: 0; border: 2px solid var(--kas-bundle-accent); border-radius: 14px; overflow: hidden; }
+  .kas-bundle__ribbon { background: var(--kas-bundle-accent); color: #fff; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .kas-bundle__ribbon .kas-bundle__title { font-weight: 700; font-size: 15px; color: #fff; }
+  .kas-bundle__ribbon .kas-bundle__badge { background: rgba(255,255,255,.22); }
+  .kas-bundle__body { padding: 12px 16px 16px; }
+  /* Scoped and !important like the base tick rule above, which it must win over. */
+  .kas-bundles input.kas-bundle__toggle--circle {
+    -webkit-appearance: none !important; appearance: none !important;
+    width: 20px !important; height: 20px !important; min-width: 20px !important; min-height: 20px !important;
+    border-radius: 50% !important; border: 2px solid var(--kas-bundle-accent) !important;
+    background: #fff !important; box-shadow: none !important; box-sizing: border-box !important;
+  }
+  .kas-bundles input.kas-bundle__toggle--circle:checked {
+    background: var(--kas-bundle-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.3 2.3 4.7-4.9' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 12px no-repeat !important;
+  }
+  .kas-bundle--savings .kas-bundle__img { width: 40px; height: 40px; }
+  .kas-bundle--savings .kas-bundle__total { margin: 12px 0 6px; }
+  .kas-bundle--savings .kas-bundle__now { font-size: 26px; font-weight: 800; }
+  .kas-bundle--savings .kas-bundle__was { font-size: 15px; }
+
+  /* ── Tier ladder and "Add 1 more item to save 15%" ── */
+  .kas-bundle__pricing { margin: -4px 0 10px; }
+  .kas-bundle--compact .kas-bundle__pricing { margin: 6px 0 0 6px; }
+  .kas-bundle__ladder { display: flex; flex-wrap: wrap; gap: 6px; }
+  .kas-bundle__tier { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid rgba(0,0,0,.15); opacity: .75; white-space: nowrap; }
+  .kas-bundle__tier--on { opacity: 1; font-weight: 700; color: #fff; background: var(--kas-bundle-accent); border-color: var(--kas-bundle-accent); }
+  .kas-bundle__nudge { font-size: 12px; font-weight: 600; color: var(--kas-bundle-accent); margin: 6px 0 0; }
+  .kas-bundle__ladder[hidden], .kas-bundle__nudge[hidden], .kas-bundle__pricing[hidden] { display: none; }
+
+  /* ── Build-your-own box ── */
+  .kas-bundle__progress { margin-bottom: 12px; }
+  .kas-bundle__counter { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .kas-bundle__track { height: 6px; border-radius: 999px; background: rgba(0,0,0,.08); overflow: hidden; }
+  .kas-bundle__fill { height: 100%; width: 0; background: var(--kas-bundle-accent); transition: width .2s ease; }
+  .kas-bundle__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .kas-bundle__cell { border: 1px solid rgba(0,0,0,.12); border-radius: 10px; padding: 8px; font-size: 12px; line-height: 1.3; display: flex; flex-direction: column; gap: 4px; }
+  .kas-bundle__cell--on { border-color: var(--kas-bundle-accent); box-shadow: 0 0 0 1px var(--kas-bundle-accent); }
+  .kas-bundle__cell .kas-bundle__img { width: 100%; height: auto; aspect-ratio: 1; border-radius: 8px; }
+  .kas-bundle__cell .kas-bundle__tile-name { margin-top: 2px; }
+  .kas-bundle__stepper { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 4px; }
+  /* Themes restyle every button; pin what they change, as with the ticks. */
+  .kas-bundles button.kas-bundle__step {
+    -webkit-appearance: none !important; appearance: none !important;
+    width: 28px !important; height: 28px !important; min-width: 28px !important; min-height: 28px !important;
+    margin: 0 !important; padding: 0 !important; border-radius: 50% !important;
+    border: 1px solid var(--kas-bundle-accent) !important; background: #fff !important; color: var(--kas-bundle-accent) !important;
+    font-size: 16px !important; font-weight: 700 !important; line-height: 1 !important; box-shadow: none !important;
+    display: inline-flex !important; align-items: center; justify-content: center; cursor: pointer;
+  }
+  .kas-bundles button.kas-bundle__step:not([disabled]):hover { background: var(--kas-bundle-accent) !important; color: #fff !important; }
+  .kas-bundles button.kas-bundle__step[disabled] { opacity: .35 !important; cursor: not-allowed; }
+  .kas-bundle__step-count { min-width: 20px; text-align: center; font-weight: 700; font-size: 14px; }
+
+  @media (max-width: 480px) {
+    .kas-bundle--compact { border-radius: 16px; }
+    .kas-bundle__bar { flex-wrap: wrap; }
+    .kas-bundle--compact .kas-bundle__button { width: 100%; }
+  }
+</style>
+
+<script src="{{ 'bundle-offer.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Product bundles",
+  "target": "section",
+  "templates": ["product"],
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Buy it as a bundle"
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "Add bundle to cart"
+    },
+    {
+      "type": "select",
+      "id": "after_add",
+      "label": "After adding to cart",
+      "options": [
+        { "value": "cart", "label": "Go to the cart page" },
+        { "value": "stay", "label": "Stay on the product page" }
+      ],
+      "default": "cart"
+    },
+    {
+      "type": "color",
+      "id": "accent_color",
+      "label": "Accent color",
+      "default": "#5B4FCB"
+    }
+  ]
+}
+{% endschema %}

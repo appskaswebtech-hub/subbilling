@@ -33,6 +33,8 @@ import {
   cancelContract,
 } from "../lib/subscription-contract.server";
 import { backfillContracts } from "../lib/subscription-backfill.server";
+import { syncCommissionFromShopify, type CommissionSyncSummary } from "../lib/commission-sync.server";
+import { resendInvoice, cancelInitialInvoice } from "../lib/prepaid.server";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 const PAGE_SIZE = 20;
@@ -108,18 +110,48 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // Scoped to the customer too, so the stat cards agree with the visible rows.
   const baseWhere = { shop: session.shop, ...customerWhere };
 
-  const [subscriptions, total, totalAll, totalActive, totalPaused, totalCancelled] =
+  const [subscriptions, total, totalAll, totalActive, totalPaused, totalCancelled, awaitingFirstPayment] =
     await Promise.all([
-      prisma.subscription.findMany({ where, orderBy: { createdAt: "desc" }, skip, take: PAGE_SIZE }),
+      prisma.subscription.findMany({
+        where, orderBy: { createdAt: "desc" }, skip, take: PAGE_SIZE,
+        // The latest payment link, for prepaid rows. Postpaid rows have none.
+        include: {
+          prepaidInvoices: {
+            orderBy: { createdAt: "desc" },
+            take:    1,
+            select:  { id: true, status: true, sentAt: true, dueAt: true, paidAt: true, error: true, sender: true },
+          },
+        },
+      }),
       prisma.subscription.count({ where }),
       prisma.subscription.count({ where: baseWhere }),
       prisma.subscription.count({ where: { ...baseWhere, status: "ACTIVE" } }),
       prisma.subscription.count({ where: { ...baseWhere, status: "PAUSED" } }),
       prisma.subscription.count({ where: { ...baseWhere, status: "CANCELLED" } }),
+      // Prepaid subscriptions a merchant set up that the customer hasn't paid
+      // for yet. They have no contract, so no row in the table above.
+      prisma.prepaidInvoice.findMany({
+        where:   { shop: session.shop, kind: "INITIAL", subscriptionId: null, status: { in: ["CREATING", "SENT", "FAILED", "PAID"] } },
+        orderBy: { createdAt: "desc" },
+        take:    20,
+        select:  { id: true, status: true, sentAt: true, dueAt: true, error: true, amount: true, currency: true, setupJson: true },
+      }),
     ]);
+
+  // Only what the page shows: setupJson also holds addresses and prices.
+  const pendingSetups = awaitingFirstPayment.map(({ setupJson, ...inv }) => {
+    let email = "", label = "";
+    try {
+      const setup = JSON.parse(setupJson ?? "{}") as { email?: string; label?: string };
+      email = setup.email ?? "";
+      label = setup.label ?? "";
+    } catch { /* shown without them */ }
+    return { ...inv, email, label };
+  });
 
   return json({
     subscriptions,
+    pendingSetups,
     total,
     page,
     totalPages: Math.ceil(total / PAGE_SIZE),
@@ -144,12 +176,34 @@ export async function action({ request }: ActionFunctionArgs) {
   // than automatic: this walks the Admin API, and running it on every page load
   // would be a lot of requests for a result that rarely changes.
   if (formData.get("intent") === "sync") {
+    let summary;
     try {
-      const summary = await backfillContracts(admin.graphql, session.shop);
-      return json({ ok: true, sync: summary });
+      summary = await backfillContracts(admin.graphql, session.shop);
     } catch (err: any) {
       return json({ error: `Sync failed: ${err?.message ?? "unknown error"}` }, { status: 502 });
     }
+
+    // Commission is mirrored from Shopify's usage records after the contracts.
+    // Read-only toward Shopify — nothing is charged. It never throws, and its
+    // outcome is reported beside the contract sync rather than failing it: the
+    // contracts are what this button is for.
+    const commission = await syncCommissionFromShopify(admin.graphql, session.shop);
+
+    return json({ ok: true, sync: summary, commission });
+  }
+
+  // ── Prepaid payment links ───────────────────────────────────
+  if (formData.get("intent") === "resend-invoice") {
+    const result = await resendInvoice(admin.graphql, session.shop, formData.get("invoiceId") as string);
+    return result.ok
+      ? json({ ok: true, notice: "Payment email sent." })
+      : json({ error: result.error ?? "The payment email could not be sent." });
+  }
+  if (formData.get("intent") === "cancel-setup") {
+    const result = await cancelInitialInvoice(admin.graphql, session.shop, formData.get("invoiceId") as string);
+    return result.ok
+      ? json({ ok: true, notice: "Cancelled. The payment link no longer works." })
+      : json({ error: result.error ?? "Could not cancel it." });
   }
 
   const rawId       = formData.get("id")     as string;
@@ -199,6 +253,34 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
+type InvoiceSummary = {
+  id: string; status: string;
+  sentAt: string | null; dueAt: string | null; paidAt: string | null;
+  error: string | null;
+};
+
+function shortDate(iso: string | null): string {
+  return iso
+    ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })
+    : "";
+}
+
+/**
+ * One line under a prepaid subscription's status: where its latest payment
+ * link stands. Postpaid rows get nothing.
+ */
+function prepaidNote(inv: InvoiceSummary | undefined): { text: string; color: string } {
+  if (!inv) return { text: "Prepaid", color: T.blueFg };
+  switch (inv.status) {
+    case "SENT":      return { text: `Prepaid · awaiting payment${inv.dueAt ? ` (due ${shortDate(inv.dueAt)})` : ""}`, color: T.amberFg };
+    case "PAID":      return { text: `Prepaid · paid ${shortDate(inv.paidAt)}`, color: T.greenFg };
+    case "EXPIRED":   return { text: "Prepaid · link expired unpaid", color: T.redFg };
+    case "FAILED":    return { text: "Prepaid · payment email failed", color: T.redFg };
+    case "CANCELLED": return { text: "Prepaid · link cancelled", color: "var(--p-color-text-subdued)" };
+    default:          return { text: "Prepaid · sending link…", color: T.blueFg };
+  }
+}
+
 function statusPill(status: string) {
   const styles: Record<string, { bg: string; color: string; dot: string }> = {
     ACTIVE:    { bg: T.greenBg,  color: T.greenFg,  dot: T.greenDot },
@@ -513,7 +595,7 @@ function RowMenu({
 
 // ─── Component ────────────────────────────────────────────────
 export default function Subscriptions() {
-  const { subscriptions, total, page, totalPages, counts, customerFilter } = useLoaderData<typeof loader>();
+  const { subscriptions, pendingSetups, total, page, totalPages, counts, customerFilter } = useLoaderData<typeof loader>();
   const navigate    = useNavigate();
   const submit      = useSubmit();
   const [params]    = useSearchParams();
@@ -529,6 +611,13 @@ export default function Subscriptions() {
     failed: Array<{ id: string; reason: string }>;
     truncated: boolean;
   } } | undefined)?.sync;
+
+  // Commission mirrored during the same sync. Absent on a flat-fee shop, where
+  // there is no usage line and nothing to report.
+  const commissionSync = (actionData as { commission?: CommissionSyncSummary } | undefined)?.commission;
+  const commissionShown = !!commissionSync && commissionSync.skipped !== "no-usage-line";
+  const commissionProblem =
+    !!commissionSync && (!!commissionSync.error || commissionSync.missingAtShopify > 0);
 
   const [searchInput,  setSearchInput]  = useState(params.get("search") ?? "");
   const [actionError,  setActionError]  = useState<string | null>(null);
@@ -577,6 +666,27 @@ export default function Subscriptions() {
   function handleCancel(id: string) {
     if (!confirm("Cancel this subscription? This cannot be undone.")) return;
     quickStatus(id, "CANCELLED");
+  }
+
+  // Which action produced the current actionData, so its banner can be titled
+  // for what actually happened.
+  const [lastIntent, setLastIntent] = useState("");
+  useEffect(() => {
+    const intent = navigation.formData?.get("intent");
+    if (navigation.state === "submitting") setLastIntent(String(intent ?? ""));
+  }, [navigation.state, navigation.formData]);
+
+  // Prepaid payment-link actions (resend, cancel an unpaid setup).
+  const invoiceBusy =
+    navigation.state !== "idle" &&
+    ["resend-invoice", "cancel-setup"].includes(String(navigation.formData?.get("intent") ?? ""));
+
+  function invoiceAction(intent: "resend-invoice" | "cancel-setup", invoiceId: string) {
+    if (intent === "cancel-setup" && !confirm("Cancel this subscription? The customer's payment link will stop working.")) return;
+    const fd = new FormData();
+    fd.append("intent", intent);
+    fd.append("invoiceId", invoiceId);
+    submit(fd, { method: "post" });
   }
 
   function timeAgo(d: Date) {
@@ -654,9 +764,14 @@ export default function Subscriptions() {
               {total} total contract{total !== 1 ? "s" : ""}
             </Text>
           </BlockStack>
-          <Button variant="primary" onClick={() => navigate("/app/plans")}>
-            + Create plan
-          </Button>
+          <InlineStack gap="200">
+            <Button onClick={() => navigate("/app/subscriptions/new")}>
+              + Create prepaid subscription
+            </Button>
+            <Button variant="primary" onClick={() => navigate("/app/plans")}>
+              + Create plan
+            </Button>
+          </InlineStack>
         </InlineStack>
 </div>
         {/* Deep-linked from the Shopify admin for one customer */}
@@ -692,17 +807,87 @@ export default function Subscriptions() {
         {/* Sync result. Reported rather than silent — a partial import that
             said nothing would look identical to a complete one. */}
         {actionData && "error" in actionData && actionData.error && (
-          <Banner tone="critical" title="Sync failed">
+          <Banner
+            tone="critical"
+            title={lastIntent === "resend-invoice" || lastIntent === "cancel-setup" ? "Payment link" : "Sync failed"}
+          >
             <Text as="p">{String(actionData.error)}</Text>
           </Banner>
         )}
+        {actionData && "notice" in actionData && actionData.notice && (
+          <Banner tone="success" title="Payment link">
+            <Text as="p">{String(actionData.notice)}</Text>
+          </Banner>
+        )}
+
+        {/* Prepaid subscriptions set up by the merchant and not paid yet.
+            They have no contract until the customer pays, so they can't be
+            rows in the table below. */}
+        {pendingSetups.length > 0 && (
+          <div style={{
+            background: "var(--p-color-bg-surface)", border: "0.5px solid var(--p-color-border)",
+            borderRadius: "14px", padding: "16px 20px",
+          }}>
+            <BlockStack gap="200">
+              <Text as="h2" variant="headingSm">Waiting for first payment</Text>
+              {pendingSetups.map((p) => (
+                <div key={p.id} style={{
+                  display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap",
+                  padding: "8px 0", borderTop: "0.5px solid var(--p-color-border-secondary)",
+                }}>
+                  <div style={{ flex: 1, minWidth: "220px" }}>
+                    <Text as="p" variant="bodySm" fontWeight="medium">{p.label || "Prepaid subscription"}</Text>
+                    <Text as="p" variant="bodySm" tone="subdued">
+                      {p.email}
+                      {" · "}
+                      {p.status === "SENT"
+                        ? `link sent${p.dueAt ? `, due ${shortDate(p.dueAt)}` : ""}`
+                        : p.status === "PAID"
+                        ? "paid — creating the subscription"
+                        : p.status === "FAILED"
+                        ? `email failed${p.error ? `: ${p.error}` : ""}`
+                        : "sending link…"}
+                    </Text>
+                  </div>
+                  {p.status !== "PAID" && (
+                    <InlineStack gap="200">
+                      <Button size="slim" disabled={invoiceBusy} onClick={() => invoiceAction("resend-invoice", p.id)}>
+                        {p.status === "FAILED" ? "Retry" : "Resend link"}
+                      </Button>
+                      <Button size="slim" tone="critical" variant="plain" disabled={invoiceBusy} onClick={() => invoiceAction("cancel-setup", p.id)}>
+                        Cancel
+                      </Button>
+                    </InlineStack>
+                  )}
+                </div>
+              ))}
+            </BlockStack>
+          </div>
+        )}
         {syncResult && (
-          <Banner tone={syncResult.failed.length ? "warning" : "success"} title="Sync complete">
+          <Banner
+            tone={syncResult.failed.length || commissionProblem ? "warning" : "success"}
+            title="Sync complete"
+          >
             <Text as="p">
               {syncResult.created} added · {syncResult.updated} updated
               {syncResult.failed.length ? ` · ${syncResult.failed.length} failed: ${syncResult.failed[0].reason}` : ""}
               {syncResult.truncated ? " · stopped at the page limit; run again for the rest" : ""}
             </Text>
+
+            {commissionShown && commissionSync && (
+              <Text as="p">
+                {commissionSync.error
+                  ? `Commission could not be synced: ${commissionSync.error}`
+                  : commissionSync.skipped === "usage-line-not-active"
+                  ? "Commission not synced: your approved plan has changed since commission was set up. Re-open Billing to re-approve."
+                  : `Commission: ${commissionSync.matched} matched Shopify · ${commissionSync.updated} updated · ${commissionSync.added} added`}
+                {commissionSync.missingAtShopify > 0
+                  ? ` · ${commissionSync.missingAtShopify} charge${commissionSync.missingAtShopify === 1 ? "" : "s"} in this app weren't found at Shopify`
+                  : ""}
+                {commissionSync.truncated ? " · stopped at the record limit" : ""}
+              </Text>
+            )}
           </Banner>
         )}
         <div className="card-section">
@@ -1027,7 +1212,21 @@ export default function Subscriptions() {
 
                         {/* Status */}
 
-                        <td style={cell} className="status-name">{statusPill(s.status)}</td>
+                        <td style={cell} className="status-name">
+                          {statusPill(s.status)}
+                          {s.paymentMode === "PREPAID" && (() => {
+                            const inv  = s.prepaidInvoices?.[0] as InvoiceSummary | undefined;
+                            const note = prepaidNote(inv);
+                            return (
+                              <div
+                                style={{ fontSize: "11px", color: note.color, marginTop: "3px" }}
+                                title={inv?.error ?? undefined}
+                              >
+                                {note.text}
+                              </div>
+                            );
+                          })()}
+                        </td>
 
                         {/* Price */}
                         <td style={{ ...cell, fontWeight: 500 }} className="price-section">
@@ -1073,6 +1272,27 @@ export default function Subscriptions() {
                             >
                               View
                             </button>
+
+                            {/* Prepaid: re-send an open or failed payment link */}
+                            {s.paymentMode === "PREPAID" &&
+                              ["SENT", "FAILED"].includes(s.prepaidInvoices?.[0]?.status) && (
+                              <button
+                                onClick={() => invoiceAction("resend-invoice", s.prepaidInvoices[0].id)}
+                                disabled={invoiceBusy}
+                                style={{
+                                  fontSize:     "12px",
+                                  padding:      "5px 10px",
+                                  border:       `0.5px solid #AFA9EC`,
+                                  borderRadius: "7px",
+                                  background:   T.purpleBg,
+                                  color:        T.purpleFg,
+                                  cursor:       "pointer",
+                                  whiteSpace:   "nowrap",
+                                }}
+                              >
+                                {s.prepaidInvoices[0].status === "FAILED" ? "retry link" : "resend link"}
+                              </button>
+                            )}
 
                             {/* Kebab menu */}
                              {/* <RowMenu

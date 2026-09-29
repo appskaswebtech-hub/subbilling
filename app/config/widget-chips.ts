@@ -44,3 +44,15 @@ export function serializeBenefitChips(chips: string[]): string {
     .slice(0, MAX_BENEFIT_CHIPS)
     .join("\n");
 }
+
+/**
+ * Whether a list is just the untouched defaults.
+ *
+ * The plan editor opens every plan on DEFAULT_BENEFIT_CHIPS and used to save
+ * them back as that plan's own chips, so every plan "overrode" the shop-wide
+ * chips with the defaults and anything set in Widget Settings never showed.
+ * A plan's chips only count as its own when they differ from these.
+ */
+export function isDefaultBenefitChips(chips: string[]): boolean {
+  return serializeBenefitChips(chips) === serializeBenefitChips(DEFAULT_BENEFIT_CHIPS);
+}

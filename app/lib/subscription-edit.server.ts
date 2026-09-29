@@ -26,6 +26,7 @@ import {
   type SellingPlanInterval,
 } from "./subscription-draft.server";
 import type { AdminGraphQL } from "./subscription-contract.server";
+import { chargeInFlight } from "./prepaid-hold.server";
 
 const VALID_INTERVALS: SellingPlanInterval[] = ["DAY", "WEEK", "MONTH", "YEAR"];
 
@@ -65,15 +66,12 @@ export async function handleContractEdit({
 
   // ── Guard: never edit while a charge is in flight ──────────
   // The cron advances nextBillingDate BEFORE creating the attempt, so an edit
-  // landing mid-flight can bill the same cycle twice.
-  const pending = await prisma.billingAttempt.count({
-    where: { subscriptionId: localId, status: "PENDING" },
-  });
-  if (pending > 0) {
-    return json(
-      { error: "A billing attempt is in progress for this subscription. Try again once it settles." },
-      { status: 409 },
-    );
+  // landing mid-flight can bill the same cycle twice. For prepaid
+  // subscriptions the "charge in flight" is an open payment link instead;
+  // their permanent payment hold doesn't count (prepaid-hold.server.ts).
+  const inFlight = await chargeInFlight(localId);
+  if (inFlight) {
+    return json({ error: inFlight }, { status: 409 });
   }
 
   // ── Read the live contract: needed for line ids, for diffing, and for the

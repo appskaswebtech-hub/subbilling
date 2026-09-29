@@ -33,7 +33,7 @@ const T = {
 
 // ─── Support configuration ────────────────────────────────────
 // Single place to change the address and the promises we make about it.
-const SUPPORT_EMAIL = "info@kaswebtechsolutions.com";
+const SUPPORT_EMAIL = "apps@kaswebtechsolutions.com";
 
 // Response windows advertised per support tier. These are commitments shown to
 // merchants — change them here, not in the JSX.

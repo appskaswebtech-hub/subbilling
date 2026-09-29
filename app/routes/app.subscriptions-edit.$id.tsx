@@ -22,6 +22,7 @@ import {
   type ShopifyContract,
 } from "../lib/subscription-sync.server";
 import { handleContractEdit } from "../lib/subscription-edit.server";
+import { chargeInFlight } from "../lib/prepaid-hold.server";
 import { formatMoney } from "../config/currency";
 import { CommissionCell } from "../components/CommissionCell";
 import { splitCommissions } from "../lib/commission-display";
@@ -196,10 +197,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
   }
 
   // Editing mid-charge can bill the same cycle twice — the cron advances
-  // nextBillingDate before it creates the attempt.
-  const pendingAttempts = await prisma.billingAttempt.count({
-    where: { subscriptionId: subscription.id, status: "PENDING" },
-  });
+  // nextBillingDate before it creates the attempt. Prepaid subscriptions lock
+  // on an open payment link instead (their payment hold doesn't count).
+  const editLock = await chargeInFlight(subscription.id);
 
   // What the app actually billed the merchant for each of these attempts.
   // Read back rather than recomputed: the stored amount is the one that went to
@@ -232,7 +232,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     ordersScopeMissing,
     commissions,
     revision:          contractRevision(contract),
-    hasPendingAttempt: pendingAttempts > 0,
+    hasPendingAttempt: !!editLock,
+    editLock,
   });
 }
 
@@ -441,7 +442,7 @@ function SectionCard({ title, icon, children }: { title: string; icon?: string; 
 // ─── Component ────────────────────────────────────────────────
 export default function SubscriptionDetail() {
   const {
-    subscription, contract, contractError, revision, hasPendingAttempt,
+    subscription, contract, contractError, revision, hasPendingAttempt, editLock,
     orders, ordersError, ordersScopeMissing, commissions,
   } = useLoaderData<typeof loader>();
   const actionData        = useActionData<typeof action>();
@@ -457,7 +458,7 @@ export default function SubscriptionDetail() {
   const editDisabled = s.status === "CANCELLED" || hasPendingAttempt || !contract;
   const editNote =
     !contract       ? `Live contract data is unavailable, so editing is off. ${contractError ?? ""}`
-    : hasPendingAttempt ? "A billing attempt is in progress — editing is locked until it settles."
+    : hasPendingAttempt ? (editLock ?? "A billing attempt is in progress — editing is locked until it settles.")
     : s.status === "CANCELLED" ? "This subscription is cancelled and can no longer be edited."
     : null;
 

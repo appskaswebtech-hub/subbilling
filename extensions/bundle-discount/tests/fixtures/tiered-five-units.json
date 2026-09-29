@@ -1,0 +1,130 @@
+{
+  "payload": {
+    "export": "cart-lines-discounts-generate-run",
+    "target": "cart.lines.discounts.generate.run",
+    "input": {
+      "presentmentCurrencyRate": "1.0",
+      "cart": {
+        "lines": [
+          {
+            "id": "gid://shopify/CartLine/1",
+            "quantity": 3,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "10.0"
+              }
+            },
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/11",
+              "product": {
+                "id": "gid://shopify/Product/1"
+              }
+            }
+          },
+          {
+            "id": "gid://shopify/CartLine/2",
+            "quantity": 2,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "10.0"
+              }
+            },
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/32",
+              "product": {
+                "id": "gid://shopify/Product/3"
+              }
+            }
+          }
+        ]
+      },
+      "discount": {
+        "discountClasses": [
+          "PRODUCT"
+        ],
+        "metafield": {
+          "jsonValue": {
+            "bundles": [
+              {
+                "id": "bundle-a",
+                "title": "Mix & save",
+                "percent": 0,
+                "kind": "SET",
+                "pricingMode": "TIERED",
+                "fixedPrice": null,
+                "minItems": 0,
+                "tiers": [
+                  {
+                    "minItems": 2,
+                    "percent": 10
+                  },
+                  {
+                    "minItems": 3,
+                    "percent": 15
+                  },
+                  {
+                    "minItems": 5,
+                    "percent": 20
+                  }
+                ],
+                "lines": [
+                  {
+                    "productId": "gid://shopify/Product/1",
+                    "quantity": 1
+                  },
+                  {
+                    "productId": "gid://shopify/Product/2",
+                    "quantity": 1
+                  },
+                  {
+                    "productId": "gid://shopify/Product/3",
+                    "quantity": 1
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "output": {
+      "operations": [
+        {
+          "productDiscountsAdd": {
+            "candidates": [
+              {
+                "message": "Mix & save: 20% off",
+                "targets": [
+                  {
+                    "cartLine": {
+                      "id": "gid://shopify/CartLine/1"
+                    }
+                  },
+                  {
+                    "cartLine": {
+                      "id": "gid://shopify/CartLine/2"
+                    }
+                  }
+                ],
+                "value": {
+                  "percentage": {
+                    "value": 20
+                  }
+                }
+              }
+            ],
+            "selectionStrategy": "ALL"
+          }
+        }
+      ]
+    }
+  }
+}

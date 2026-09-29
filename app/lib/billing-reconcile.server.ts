@@ -137,6 +137,10 @@ export async function reconcilePendingAttempts(): Promise<{
       where: {
         status:    "PENDING",
         createdAt: { lt: new Date(Date.now() - SETTLE_GRACE_MS) },
+        // A prepaid subscription's PENDING attempt is its payment hold, not a
+        // Shopify billing attempt, so there is nothing at Shopify to match it
+        // to. prepaid.server.ts settles those (see prepaid-hold.server.ts).
+        subscription: { paymentMode: "POSTPAID" },
       },
       // Oldest first: the most stuck are the ones actually blocking billing.
       orderBy: { createdAt: "asc" },

@@ -17,7 +17,8 @@ api_version = "2026-04"
   "subscription_contracts/create",
   "subscription_billing_attempts/failure",
   "subscription_billing_attempts/success",
-  "subscription_contracts/update"
+  "subscription_contracts/update",
+  "orders/paid"
 ]
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
 
@@ -31,7 +32,7 @@ api_version = "2026-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "customer_read_customers,customer_read_own_subscription_contracts,customer_write_own_subscription_contracts,read_customer_payment_methods,read_customers,read_draft_orders,read_inventory,read_orders,read_own_subscription_contracts,read_products,read_purchase_options,write_customers,write_draft_orders,write_own_subscription_contracts,write_products,write_purchase_options"
+scopes = "customer_read_customers,customer_read_own_subscription_contracts,customer_write_own_subscription_contracts,read_customer_payment_methods,read_customers,read_discounts,read_draft_orders,read_inventory,read_orders,read_own_subscription_contracts,read_products,read_purchase_options,write_customers,write_discounts,write_draft_orders,write_own_subscription_contracts,write_products,write_purchase_options"
 
 [auth]
 redirect_urls = [

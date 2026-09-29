@@ -9,7 +9,7 @@ import polarisStyles   from "@shopify/polaris/build/esm/styles.css?url";
 import { Text, List }  from "@shopify/polaris";
 import { authenticate }      from "../shopify.server";
 import { getShopPlanFromDB } from "../utils/planUtils";
-import { PLANS, PLAN_ORDER } from "../config/plans";
+import { PLANS, PLAN_ORDER, formatRate } from "../config/plans";
 
 export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
 
@@ -163,7 +163,7 @@ function PlanGatePopup() {
                   </Text>
                   <Text as="p" variant="bodySm" tone="subdued">
                     {plan.commissionRate
-                      ? `${Math.round(plan.commissionRate * 100)}% per charge`
+                      ? `${formatRate(plan.commissionRate)} per charge`
                       : "/ month"}
                   </Text>
                 </div>
@@ -240,6 +240,7 @@ export default function App() {
       <NavMenu>
         <Link to="/app" rel="home">Home</Link>
         <Link to="/app/plans">Subscription Plans</Link>
+        <Link to="/app/bundles">Bundles</Link>
         <Link to="/app/subscriptions">Subscriptions</Link>
         <Link to="/app/customers">Customers</Link>
         <Link to="/app/api-key">API Key</Link>

@@ -1,0 +1,24 @@
+api_version = "2026-07"
+
+# Prices one-time product bundles. Created as an automatic app discount by
+# app/lib/bundles.server.ts (syncOneTimeBundleDiscount), which also keeps the
+# bundle list in the discount's $app/bundle-config metafield.
+#
+# Product lines only: a bundle discount never touches shipping, so the
+# delivery-options target from the template was removed.
+
+[[extensions]]
+name = "t:name"
+handle = "bundle-discount"
+type = "function"
+uid = "208e9edf-8b9b-6b74-3f3a-539fdede2328f859a084"
+description = "t:description"
+
+  [[extensions.targeting]]
+  target = "cart.lines.discounts.generate.run"
+  input_query = "src/cart_lines_discounts_generate_run.graphql"
+  export = "cart-lines-discounts-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"

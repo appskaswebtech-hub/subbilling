@@ -5,22 +5,25 @@ name = "Smart Subscriptions"
 application_url = "https://subscription.kaswebtechsolutions.com"
 embedded = true
 
+[build]
+automatically_update_urls_on_dev = true
+
 [webhooks]
 api_version = "2026-04"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks"
   topics = [
   "subscription_contracts/create",
   "subscription_billing_attempts/failure",
-  "subscription_billing_attempts/success",
-  "subscription_contracts/update"
+  "subscription_contracts/update",
+  "subscription_billing_attempts/success"
 ]
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks/app/scopes_update"
-  topics = [ "app/scopes_update" ]
 
   [[webhooks.subscriptions]]
   uri = "/webhooks/app/uninstalled"
@@ -37,6 +40,3 @@ redirect_urls = [ "https://subscription.kaswebtechsolutions.com/api/auth" ]
 url = "https://subscription.kaswebtechsolutions.com/apps/subscriptions"
 subpath = "subscriptions"
 prefix = "apps"
-
-[build]
-automatically_update_urls_on_dev = true

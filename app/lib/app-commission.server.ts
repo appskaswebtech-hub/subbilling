@@ -14,7 +14,7 @@
 // with status FAILED — it is not an outage for the merchant.
 
 import db          from "../db.server";
-import { PLANS, calcCommission, APP_BILLING_CURRENCY } from "../config/plans";
+import { PLANS, calcCommission, formatRate, APP_BILLING_CURRENCY } from "../config/plans";
 import { convert, localizedCap } from "../config/currency";
 
 // The subset of the Prisma Subscription row this module needs. Declared
@@ -500,9 +500,12 @@ export async function chargeCommission({
     // `amount` is now guaranteed to be denominated in `billingCurrency`, which
     // is the currency Shopify created the usage line in — the only currency
     // appUsageRecordCreate will accept for it.
+    // Appears on the merchant's Shopify invoice, so the rate must be exact.
+    // formatRate rather than Math.round(rate * 100): the latter printed 0.5% as
+    // "1%" beside a charge actually worked out at 0.5%.
     const description = orderName
-      ? `${Math.round(rate * 100)}% commission on subscription order ${orderName}`
-      : `${Math.round(rate * 100)}% commission on subscription charge`;
+      ? `${formatRate(rate)} commission on subscription order ${orderName}`
+      : `${formatRate(rate)} commission on subscription charge`;
 
     const res = await admin.graphql(USAGE_RECORD_CREATE, {
       variables: {

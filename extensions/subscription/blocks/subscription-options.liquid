@@ -1,6 +1,25 @@
 <link rel="stylesheet" href="{{ 'subscription.css' | asset_url }}">
 
-{%- if product.selling_plan_groups.size > 0 -%}
+{%- comment -%}
+  Recurring product bundles each have their own selling plan group, tagged with
+  app_id "kas-bundle" (app/lib/bundles.server.ts). Those plans carry the bundle
+  discount and are only meant for the bundle block, so they are left out of
+  this widget everywhere below. Their plan ids are collected as ",id,id," so
+  they can be matched with `contains`.
+{%- endcomment -%}
+{%- assign sub_group_count = 0 -%}
+{%- assign bundle_plan_ids = ',' -%}
+{%- for g in product.selling_plan_groups -%}
+  {%- if g.app_id == 'kas-bundle' -%}
+    {%- for p in g.selling_plans -%}
+      {%- assign bundle_plan_ids = bundle_plan_ids | append: p.id | append: ',' -%}
+    {%- endfor -%}
+  {%- else -%}
+    {%- assign sub_group_count = sub_group_count | plus: 1 -%}
+  {%- endif -%}
+{%- endfor -%}
+
+{%- if sub_group_count > 0 -%}
 
 {%- comment -%} Pass accent color from block settings into CSS variable {%- endcomment -%}
 <style>
@@ -77,9 +96,18 @@
   a euro store rendered dollar prices in the widget while the rest of the page
   was correct. shop.money_format is always right and always available here.
 {%- endcomment -%}
+{%- comment -%}
+  data-app-config is the widget configuration the app stores IN SHOPIFY, on its
+  own installation (app/lib/widget-metafield.server.ts): the shop-wide design
+  and chips, and each plan's chips, design and colours keyed by selling plan id.
+  It is read here, at render time, so a plan's chips show as soon as the plan is
+  saved, whichever server the /apps/subscriptions proxy happens to reach. The
+  proxy's answer is only a fallback for plans this has no entry for.
+{%- endcomment -%}
 <div class="sub-widget" id="sub-widget-{{ block.id }}"
      data-design="{{ block.settings.design }}"
      data-theme-chips="{{ theme_chips | strip | escape }}"
+     data-app-config="{{ app.metafields.kas_widget.config.value | json | escape }}"
      data-money-format="{{ shop.money_format | escape }}"
      data-currency="{{ cart.currency.iso_code | default: shop.currency | escape }}">
 
@@ -92,8 +120,13 @@
   {
     {%- for variant in product.variants -%}
       "{{ variant.id }}": {
+        {%- assign alloc_sep = '' -%}
         {%- for alloc in variant.selling_plan_allocations -%}
-          "{{ alloc.selling_plan.id }}": {{ alloc.price | default: variant.price }}{%- unless forloop.last -%},{%- endunless -%}
+          {%- assign alloc_key = ',' | append: alloc.selling_plan.id | append: ',' -%}
+          {%- unless bundle_plan_ids contains alloc_key -%}
+            {{- alloc_sep }}"{{ alloc.selling_plan.id }}": {{ alloc.price | default: variant.price }}
+            {%- assign alloc_sep = ',' -%}
+          {%- endunless -%}
         {%- endfor -%}
       }{%- unless forloop.last -%},{%- endunless -%}
     {%- endfor -%}
@@ -141,6 +174,7 @@
 
     {%- comment -%} SUBSCRIPTION OPTIONS {%- endcomment -%}
     {%- for group in product.selling_plan_groups -%}
+      {%- if group.app_id == 'kas-bundle' -%}{%- continue -%}{%- endif -%}
       {%- for plan in group.selling_plans -%}
 
         {%- assign base_price   = product.selected_or_first_available_variant.price -%}

@@ -4,6 +4,7 @@ import { json } from "@remix-run/node";
 import { useLoaderData, useFetcher, useRevalidator } from "@remix-run/react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
+import { syncWidgetMetafield } from "../lib/widget-metafield.server";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
@@ -288,8 +289,16 @@ export async function action({ request }: ActionFunctionArgs) {
       return json<ActionData>({ id, success: false, error: userErrors.map((e: { message: string }) => e.message).join(", ") });
 
     // Keep the local mirror in step — deleting only in Shopify orphans this row.
+    const doomed = await prisma.sellingPlanGroup.findMany({
+      where:  { shop: session.shop, shopifyGroupId: id },
+      select: { shopifySellingPlanId: true },
+    });
     await prisma.sellingPlanGroup.deleteMany({
       where: { shop: session.shop, shopifyGroupId: id },
+    });
+    // And the widget config stored in Shopify for the theme block.
+    await syncWidgetMetafield(admin.graphql, session.shop, {
+      removedPlanIds: doomed.map((g) => g.shopifySellingPlanId).filter((p): p is string => !!p),
     });
 
     return json<ActionData>({ id, success: true });

@@ -11,7 +11,7 @@
 //                                          hardcoded app URL).
 
 import prisma from "../db.server";
-import { DEFAULT_BENEFIT_CHIPS, parseBenefitChips } from "../config/widget-chips";
+import { DEFAULT_BENEFIT_CHIPS, isDefaultBenefitChips, parseBenefitChips } from "../config/widget-chips";
 
 /**
  * Bump whenever a FIELD IS ADDED to the payload.
@@ -101,9 +101,93 @@ export const WIDGET_DEFAULTS: WidgetSettings = {
  * storefront looks up has to be keyed that way. Anything already bare passes
  * through, so this is safe whichever shape the column holds.
  */
-function bareShopifyId(gid: string): string {
+export function bareShopifyId(gid: string): string {
   const tail = gid.split("/").pop() ?? gid;
   return tail.trim();
+}
+
+/**
+ * One plan row's widget overrides, as the storefront reads them. Shared by the
+ * proxy payload (getPlanData) and the copy stored in Shopify
+ * (widget-metafield.server.ts) so the two can't disagree.
+ *
+ * Chips equal to the untouched defaults are NOT an override: the plan editor
+ * used to save the defaults onto every plan, which silently hid the shop-wide
+ * chips from Widget Settings on every product.
+ */
+export function planWidgetFromRow(g: {
+  widgetDesign?: string | null;
+  widgetBenefitChips?: string | null;
+  widgetPrimaryColor?: string | null;
+  widgetBadgeColor?: string | null;
+  widgetBorderRadius?: number | null;
+}): PlanWidget {
+  const chips = parseBenefitChips(g.widgetBenefitChips);
+  return {
+    design:       (g.widgetDesign       ?? "").trim(),
+    chips:        isDefaultBenefitChips(chips) ? [] : chips,
+    primaryColor: (g.widgetPrimaryColor ?? "").trim(),
+    badgeColor:   (g.widgetBadgeColor   ?? "").trim(),
+    borderRadius: typeof g.widgetBorderRadius === "number" ? g.widgetBorderRadius : null,
+  };
+}
+
+export function planOverridesNothing(w: PlanWidget): boolean {
+  return !w.design && !w.primaryColor && !w.badgeColor && w.borderRadius === null && w.chips.length === 0;
+}
+
+/** Shop-wide values as stored, "" / null for anything the merchant hasn't set. */
+export interface ShopWidget {
+  design:       string;
+  chips:        string[];
+  primaryColor: string;
+  badgeColor:   string;
+  borderRadius: number | null;
+  showOnetime:  boolean | null;
+}
+
+/**
+ * The widget configuration this database holds, for storing in Shopify
+ * (widget-metafield.server.ts): the shop-wide settings plus an entry for EVERY
+ * plan it tracks, overriding or not. An entry that overrides nothing still
+ * matters there — it marks the plan as tracked, so the storefront never hides it.
+ */
+export async function buildWidgetConfig(shop: string): Promise<{
+  shop: ShopWidget;
+  plans: Record<string, PlanWidget>;
+}> {
+  const [s, groups] = await Promise.all([
+    prisma.appSettings.findUnique({ where: { shop } }),
+    prisma.sellingPlanGroup.findMany({
+      where:  { shop },
+      select: {
+        shopifySellingPlanId: true,
+        widgetDesign:         true,
+        widgetBenefitChips:   true,
+        widgetPrimaryColor:   true,
+        widgetBadgeColor:     true,
+        widgetBorderRadius:   true,
+      },
+    }),
+  ]);
+
+  const plans: Record<string, PlanWidget> = {};
+  for (const g of groups) {
+    if (!g.shopifySellingPlanId) continue;
+    plans[bareShopifyId(g.shopifySellingPlanId)] = planWidgetFromRow(g);
+  }
+
+  return {
+    shop: {
+      design:       s?.widgetDesign       ?? "",
+      chips:        parseBenefitChips(s?.widgetBenefitChips),
+      primaryColor: s?.widgetPrimaryColor ?? "",
+      badgeColor:   s?.widgetBadgeColor   ?? "",
+      borderRadius: s?.widgetBorderRadius ?? null,
+      showOnetime:  s?.widgetShowOnetime  ?? null,
+    },
+    plans,
+  };
 }
 
 /**
@@ -151,20 +235,13 @@ async function getPlanData(
     // "does the app still know about this plan", not "does it restyle it".
     ids.push(bareShopifyId(g.shopifySellingPlanId));
 
-    const design       = (g.widgetDesign       ?? "").trim();
-    const primaryColor = (g.widgetPrimaryColor ?? "").trim();
-    const badgeColor   = (g.widgetBadgeColor   ?? "").trim();
-    const borderRadius = typeof g.widgetBorderRadius === "number" ? g.widgetBorderRadius : null;
-    const chips        = parseBenefitChips(g.widgetBenefitChips);
+    // Every override must count in planOverridesNothing. A plan that sets ONLY
+    // a colour would otherwise be dropped from the map and its override would
+    // never reach the storefront at all.
+    const widget = planWidgetFromRow(g);
+    if (planOverridesNothing(widget)) continue;
 
-    // Every override must appear in this test. A plan that sets ONLY a colour
-    // would otherwise be dropped from the map and its override would never
-    // reach the storefront at all.
-    const overridesNothing =
-      !design && !primaryColor && !badgeColor && borderRadius === null && chips.length === 0;
-    if (overridesNothing) continue;
-
-    map[bareShopifyId(g.shopifySellingPlanId)] = { design, chips, primaryColor, badgeColor, borderRadius };
+    map[bareShopifyId(g.shopifySellingPlanId)] = widget;
   }
 
   // Rows exist but not one carries a plan id — the /app/plans backfill has not

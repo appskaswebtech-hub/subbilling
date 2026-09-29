@@ -9,6 +9,7 @@
 // applyContractToLocal() and neither writes normalisation logic of its own.
 
 import prisma from "../db.server";
+import { ensurePrepaidHold } from "./prepaid-hold.server";
 
 // ─── GID helper ──────────────────────────────────────────────
 // Shopify mutations require the full GID. Accepts a bare numeric id, a
@@ -78,6 +79,30 @@ export const SUBSCRIPTION_CONTRACT_QUERY = `
         interval
         intervalCount
       }
+      deliveryPrice {
+        amount
+        currencyCode
+      }
+      # Where a prepaid renewal's draft order ships to.
+      deliveryMethod {
+        ... on SubscriptionDeliveryMethodShipping {
+          address {
+            firstName lastName company phone
+            address1 address2 city provinceCode countryCodeV2 zip
+          }
+        }
+        ... on SubscriptionDeliveryMethodLocalDelivery {
+          address {
+            firstName lastName company phone
+            address1 address2 city provinceCode countryCodeV2 zip
+          }
+        }
+      }
+      # Marks contracts the app created itself (see prepaid.server.ts).
+      customAttributes {
+        key
+        value
+      }
       lines(first: 20) {
         edges {
           node {
@@ -118,19 +143,95 @@ export interface ContractLine {
   lineDiscountedPrice?: { amount: string; currencyCode: string } | null;
 }
 
+export interface ContractAddress {
+  firstName?:    string | null;
+  lastName?:     string | null;
+  company?:      string | null;
+  phone?:        string | null;
+  address1?:     string | null;
+  address2?:     string | null;
+  city?:         string | null;
+  provinceCode?: string | null;
+  countryCodeV2?: string | null;
+  zip?:          string | null;
+}
+
 export interface ShopifyContract {
   id:               string;
   status?:          string;
   nextBillingDate?: string | null;
   currencyCode?:    string;
-  customer?:        { id?: string; email?: string } | null;
+  customer?:        { id?: string; email?: string; firstName?: string | null; lastName?: string | null } | null;
   billingPolicy?:   { interval?: string; intervalCount?: number } | null;
   deliveryPolicy?:  { interval?: string; intervalCount?: number } | null;
+  deliveryPrice?:   { amount: string; currencyCode: string } | null;
+  deliveryMethod?:  { address?: ContractAddress | null } | null;
+  customAttributes?: Array<{ key: string; value: string | null }> | null;
   lines?:           { edges?: Array<{ node: ContractLine }> } | null;
 }
 
 export function contractLines(contract: ShopifyContract | null | undefined): ContractLine[] {
   return contract?.lines?.edges?.map((e) => e.node) ?? [];
+}
+
+/**
+ * The title the subscriptions list shows: the first line's product, plus how
+ * many more lines a multi-line (bundle) contract has. Shared by create and
+ * update so the two can't disagree.
+ */
+export function contractTitle(contract: ShopifyContract | null | undefined): string | null {
+  const lines = contractLines(contract);
+  const first = lines[0]?.title;
+  if (!first) return null;
+  return lines.length > 1 ? `${first} + ${lines.length - 1} more` : first;
+}
+
+/** A custom attribute's value on the contract, or null. */
+export function contractAttribute(contract: ShopifyContract | null | undefined, key: string): string | null {
+  return contract?.customAttributes?.find((a) => a.key === key)?.value ?? null;
+}
+
+/**
+ * What one cycle of the contract costs, lines only (no delivery): the sum of
+ * each line's current per-unit price times its quantity.
+ *
+ * Subscription.price stays the first line's per-unit price (see
+ * applyContractToLocal). This is for the places that need the real total, such
+ * as a bundle contract's commission base or a prepaid invoice amount.
+ */
+export function contractLinesTotal(contract: ShopifyContract | null | undefined): number {
+  const total = contractLines(contract).reduce((sum, l) => {
+    const unit = l.currentPrice?.amount ? parseFloat(l.currentPrice.amount) : 0;
+    return sum + (Number.isFinite(unit) ? unit : 0) * (l.quantity ?? 1);
+  }, 0);
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * Payment mode and bundle for a new contract, from the selling plan its first
+ * line was bought on: a normal plan (SellingPlanGroup) or a recurring bundle's
+ * hidden plan (ProductBundle). Anything the app doesn't know is POSTPAID, which
+ * is how every subscription behaved before prepaid existed.
+ */
+export async function resolvePaymentModeForPlan(
+  shop: string,
+  sellingPlanId: string | null | undefined,
+): Promise<{ paymentMode: string; bundleId: string | null }> {
+  if (!sellingPlanId) return { paymentMode: "POSTPAID", bundleId: null };
+
+  const plan = await prisma.sellingPlanGroup.findFirst({
+    where:  { shop, shopifySellingPlanId: sellingPlanId },
+    select: { paymentMode: true },
+  });
+  if (plan) return { paymentMode: plan.paymentMode, bundleId: null };
+
+  const bundle = await prisma.productBundle.findFirst({
+    where:  { shop, shopifySellingPlanId: sellingPlanId },
+    select: { id: true, paymentMode: true },
+  });
+  if (bundle) return { paymentMode: bundle.paymentMode, bundleId: bundle.id };
+
+  return { paymentMode: "POSTPAID", bundleId: null };
 }
 
 // ─── Revision guard ──────────────────────────────────────────
@@ -171,7 +272,7 @@ export async function applyContractToLocal(
       status:          contract.status ? normaliseStatus(contract.status) : undefined,
       nextBillingDate: (parsedNext && !isNaN(parsedNext.getTime())) ? parsedNext : undefined,
       customerEmail:   contract.customer?.email   ?? undefined,
-      productTitle:    first?.title               ?? undefined,
+      productTitle:    contractTitle(contract)    ?? undefined,
       planName:        first?.sellingPlanName     ?? undefined,
       price:           first?.currentPrice?.amount ? parseFloat(first.currentPrice.amount) : undefined,
       frequency:       contract.billingPolicy?.interval
@@ -235,6 +336,9 @@ export interface UpsertResult {
 export async function upsertContractLocally(
   shop:     string,
   contract: ShopifyContract,
+  // For contracts the app creates itself, which know their payment mode and
+  // bundle for certain rather than by selling plan lookup.
+  overrides: { paymentMode?: string; bundleId?: string | null } = {},
 ): Promise<UpsertResult> {
   const contractGid = toContractGid(contract.id);
   const first       = contractLines(contract)[0] ?? null;
@@ -254,18 +358,26 @@ export async function upsertContractLocally(
 
   const data = {
     customerEmail: contract.customer?.email ?? "",
-    productTitle:  first?.title             ?? "Unknown Product",
+    productTitle:  contractTitle(contract)  ?? "Unknown Product",
     planName:      first?.sellingPlanName   ?? "Subscription",
     price:         first?.currentPrice?.amount ? parseFloat(first.currentPrice.amount) : 0,
     status,
     frequency,
     nextBillingDate,
+    sellingPlanId: first?.sellingPlanId ?? undefined,
   };
 
   const existing = await prisma.subscription.findUnique({
     where:  { shopifyContractId: contractGid },
     select: { id: true },
   });
+
+  // Payment mode is fixed when the subscription is created. A plan later
+  // switched between prepaid and postpaid affects new subscribers only, so it
+  // is resolved on create and never touched on update.
+  const payment = existing
+    ? null
+    : await resolvePaymentModeForPlan(shop, first?.sellingPlanId);
 
   const row = await prisma.subscription.upsert({
     where:  { shopifyContractId: contractGid },
@@ -277,8 +389,16 @@ export async function upsertContractLocally(
       // to skipping the contract entirely when Shopify withholds the customer.
       customerId: contract.customer?.id ?? "",
       ...data,
+      paymentMode: overrides.paymentMode ?? payment?.paymentMode ?? "POSTPAID",
+      bundleId:    overrides.bundleId !== undefined ? overrides.bundleId : (payment?.bundleId ?? null),
     },
   });
+
+  // A new prepaid row gets its payment hold straight away, before the billing
+  // cron can see it as due and charge the card (see prepaid-hold.server.ts).
+  // This is the one place every new row passes through: the contracts/create
+  // webhook, Sync from Shopify and app-created contracts.
+  if (!existing) await ensurePrepaidHold(row.id);
 
   return { created: !existing, id: row.id };
 }

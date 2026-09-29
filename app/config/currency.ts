@@ -5,19 +5,19 @@
 // Shopify tells us what currency a shop pays for apps in
 // (`shopBillingPreferences.currency`), and recommends matching app charges to
 // it. The Free plan's app subscription is therefore created in that currency,
-// and commission is 2% of an order already denominated in it — so the money
+// and commission is a percentage of an order already denominated in it — so the money
 // path involves NO conversion at all for the overwhelmingly common case where
 // a shop sells and pays in the same currency.
 //
 // The rates below exist for two narrow jobs, never for the primary charge:
 //
-//   1. Turning the canonical $50 monthly cap into a sensible local figure for
+//   1. Turning the canonical USD monthly cap into a sensible local figure for
 //      the approval screen.
 //   2. The rare shop that sells in one currency and pays Shopify in another.
 //
 // Because job 1 only sets a ceiling and job 2 is uncommon, rate drift cannot
-// produce the kind of error this module was written to prevent — billing 2% of
-// ₹5,000 as $100. A stale rate moves a cap slightly; it does not mischarge by
+// produce the kind of error this module was written to prevent — billing a
+// percentage of ₹5,000 as though it were $5,000. A stale rate moves a cap slightly; it does not mischarge by
 // an exchange rate.
 
 /**

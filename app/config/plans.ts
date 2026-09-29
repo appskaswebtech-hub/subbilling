@@ -18,7 +18,7 @@ export interface Plan {
   // Shopify makes cappedAmount a REQUIRED field on usage pricing — there is no
   // uncapped mode. The merchant approves the cap once; past it, no further
   // usage can be recorded until they approve a higher one.
-  commissionRate?:    number;  // 0.02 = 2% of each successful subscription charge
+  commissionRate?:    number;  // 0.005 = 0.5% of each successful subscription charge
   usageCappedAmount?: number;  // monthly ceiling, in USD
   usageTerms?:        string;  // shown verbatim on the merchant approval screen
 
@@ -36,17 +36,22 @@ export const PLANS: Record<string, Plan> = {
     color:     "#F1F8F5",
     popular:   false,
 
-    commissionRate:    0.02,
-    // At 2% this stops earning above $2,500/mo of subscription revenue. Raising
-    // it later does NOT affect merchants already approved at the old value —
-    // Shopify locks the cap into the approved AppSubscription, so they keep the
-    // cap they agreed to until they re-approve a new one.
-    usageCappedAmount: 50,
-    usageTerms:        "2% commission on each successful subscription charge",
+    commissionRate:    0.005,
+    // Meant to be effectively unlimited, but Shopify has no uncapped mode — the
+    // cap is required. At 0.5% this binds only above $200,000/month of
+    // subscription revenue. It is also shown verbatim on the approval screen
+    // ("up to $1,000.00 per month"), which is why it isn't set higher still.
+    //
+    // Changing this does NOT reach merchants already approved: Shopify locks the
+    // cap into their approved AppSubscription, so they keep the one they agreed
+    // to until they re-approve. The RATE is different — it is applied by
+    // app-commission.server.ts at charge time, so a change applies at once.
+    usageCappedAmount: 1000,
+    usageTerms:        "0.5% commission on each successful subscription charge",
 
     supportTier: "email",
     features: [
-      "No monthly fee — 2% per subscription charge",
+      "No monthly fee — 0.5% per subscription charge",
       "Up to 5 Subscription Plans",
       "Up to 50 Subscription Products",
       "Weekly, Monthly and Yearly Billing",
@@ -113,16 +118,6 @@ export const PLANS: Record<string, Plan> = {
  */
 export const APP_BILLING_CURRENCY = "USD";
 
-/**
- * How close to `usageCappedAmount` a shop must get before the billing page warns
- * them, in USD like every other figure here.
- *
- * Purely a display trigger — it changes nothing about what is reserved or
- * charged. Its job is to give the merchant time to re-approve a higher cap
- * before commission starts being refused.
- */
-export const CAP_WARNING_THRESHOLD_USD = 6;
-
 export const PLAN_KEYS = Object.keys(PLANS);
 
 // Order the billing page and compare table render in: cheapest first.
@@ -133,3 +128,20 @@ export const PLAN_ORDER = ["free", "basic", "pro", "advanced"];
 export function calcCommission(base: number, rate: number): number {
   return Math.round(base * rate * 100) / 100;
 }
+
+/**
+ * A commission rate as merchants read it: 0.005 → "0.5%", 0.02 → "2%".
+ *
+ * Every place that shows the rate must go through this. `Math.round(rate * 100)`
+ * — what the app used to do — turns 0.5% into "1%", because Math.round(0.5) is
+ * 1. That wrong figure would then appear on the merchant's Shopify invoice via
+ * the usage record description, beside a charge worked out at the true rate.
+ */
+export function formatRate(rate: number): string {
+  // toFixed then Number strips float noise (0.005 * 100 = 0.5000000000000001)
+  // and trailing zeros, so whole rates stay "2%" rather than "2.00%".
+  return `${Number((rate * 100).toFixed(2))}%`;
+}
+
+/** The free plan's rate, formatted — for copy that names it in passing. */
+export const FREE_RATE_LABEL = formatRate(PLANS.free.commissionRate ?? 0);

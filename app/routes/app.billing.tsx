@@ -11,8 +11,8 @@ import { useState, useEffect } from "react";
 import { Page, BlockStack, InlineStack, Text } from "@shopify/polaris";
 import { TitleBar }          from "@shopify/app-bridge-react";
 import { authenticate }      from "../shopify.server";
-import { PLANS, PLAN_KEYS, PLAN_ORDER, APP_BILLING_CURRENCY, CAP_WARNING_THRESHOLD_USD } from "../config/plans";
-import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney, convert } from "../config/currency";
+import { PLANS, PLAN_KEYS, PLAN_ORDER, formatRate, FREE_RATE_LABEL } from "../config/plans";
+import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney } from "../config/currency";
 
 // The currency this shop pays Shopify for apps in. Every charge must match it.
 const SHOP_BILLING_CURRENCY_QUERY = `#graphql
@@ -75,8 +75,6 @@ interface CommissionData {
   cap:        number;   // the approved monthly ceiling
   capReached: boolean;  // Shopify has refused a usage record for hitting it
   currency:   string;   // what `charged` and `cap` are denominated in
-  // How near the cap the merchant must get before the page warns, in `currency`.
-  warnThreshold: number;
   // "INR->USD" when a charge could not be converted into the billing
   // currency. Null when everything billed normally.
   unconvertible: string | null;
@@ -148,14 +146,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         // The cap must be shown in the same currency the charges are in, so it
         // is localized the same way it was when the subscription was created.
         cap: localizedCap(planMeta!.usageCappedAmount ?? 0, summary.currency),
-        // `convert`, NOT localizedCap: this is a distance to compare against,
-        // and localizedCap deliberately rounds to a presentable figure (₹498 →
-        // ₹500), which is right for a headline price and wrong here. A currency
-        // we have no rate for falls back to the USD figure rather than dropping
-        // the warning.
-        warnThreshold:
-          convert(CAP_WARNING_THRESHOLD_USD, APP_BILLING_CURRENCY, summary.currency)
-          ?? CAP_WARNING_THRESHOLD_USD,
       }
     : null;
 
@@ -274,7 +264,7 @@ const PLAN_ICONS: Record<string, { icon: string; bg: string; fg: string }> = {
 // The monthly fee row is prepended at render time from the shop's own currency
 // — hardcoding "$9.99" here would contradict the localized plan cards above it.
 const COMPARE_ROWS: Array<{ label: string; values: Record<string, string> }> = [
-  { label: "Transaction fee",       values: { free: "2% per charge", basic: "—",   pro: "—",         advanced: "—"         } },
+  { label: "Transaction fee",       values: { free: `${FREE_RATE_LABEL} per charge`, basic: "—",   pro: "—",         advanced: "—"         } },
   { label: "Subscription plans",    values: { free: "Up to 5",   basic: "Up to 5", pro: "Up to 10",  advanced: "Unlimited" } },
   { label: "Subscription products", values: { free: "Up to 50",  basic: "Up to 50", pro: "Up to 500", advanced: "Unlimited" } },
   { label: "Billing intervals",     values: { free: "Weekly, Monthly, Yearly", basic: "Weekly, Monthly, Yearly", pro: "Weekly, Monthly, Yearly", advanced: "Weekly, Monthly, Yearly" } },
@@ -291,46 +281,19 @@ export default function BillingPage() {
   const [submittingPlan, setSubmittingPlan] = useState<string | null>(null);
   const [showCompare, setShowCompare] = useState(false);
 
-  // Usage-bar geometry. Charged takes its share of the cap first; pending gets
-  // only the headroom left over, so the two segments never overflow the bar even
-  // when in-flight estimates would carry the total past the cap.
-  const chargedPct = commission && commission.cap > 0
-    ? Math.min(100, (commission.charged / commission.cap) * 100)
-    : 0;
-  const pendingPct = commission && commission.cap > 0
-    ? Math.min(100 - chargedPct, (commission.pending / commission.cap) * 100)
-    : 0;
-  // The cap is genuinely used up: further charges cannot be billed, whether or
-  // not Shopify has had occasion to refuse one yet.
-  const capUsedUp =
-    !!commission && commission.cap > 0 && commission.charged >= commission.cap;
+  // The cap is not shown. It exists only because Shopify has no uncapped usage
+  // pricing, and it is set high enough ($1,000/month, binding above $200k/month
+  // of sales at 0.5%) that a bar or an approaching-cap warning would sit near
+  // zero and mean nothing.
+  //
+  // The one cap state still surfaced is Shopify actually REFUSING a usage record.
+  // That is rare at this height but real — and it is the only one where the
+  // merchant must act, by re-approving, before commission is charged again.
+  const capWarning = !!commission?.capReached;
 
-  // Shopify has not refused anything and the cap is not full YET, but what is in
-  // flight will get there. Only meaningful while something is actually settling
-  // — once pending drains, `capUsedUp` is the accurate statement.
-  const capReachedByEstimate =
-    !!commission && commission.cap > 0 && commission.pending > 0 &&
-    commission.charged + commission.pending >= commission.cap;
-
-  // Every "this cap is spent" affordance keys off one value: the card's
-  // background and border, the bar, and the swatch dots. A merchant whose cap is
-  // full sees the warning styling immediately, not only after Shopify bounces
-  // their next charge.
-  const capFull = !!commission?.capReached || capUsedUp;
-
-  // Close enough to the cap that the merchant should act now — they can still
-  // re-approve a higher one before commission starts being refused.
-  const capNearing =
-    !capFull && !!commission && commission.cap > 0 &&
-    commission.cap - commission.charged <= commission.warnThreshold;
-
-  // Both states are warnings and colour the card the same way. The BAR is not
-  // included: a nearly-full bar must not look identical to a spent one.
-  const capWarning = capFull || capNearing;
-
-  // One colour for both bar segments and both swatch dots, so the figures above
-  // the bar and the bar itself cannot drift apart.
-  const barColor = capFull ? T.amberFg : T.purple;
+  // Swatch colour for the charged / pending figures. Amber only once Shopify has
+  // refused a charge, matching the card's warning styling.
+  const barColor = capWarning ? T.amberFg : T.purple;
 
   // Close the compare modal on Escape
   useEffect(() => {
@@ -395,7 +358,7 @@ export default function BillingPage() {
               <Text as="h1" variant="headingXl" fontWeight="bold">Choose your plan</Text>
               <Text as="p" variant="bodySm" tone="subdued">
                 Pick the plan that best fits your store's needs. Start free and pay{" "}
-                <span style={{ color: T.purpleFg, fontWeight: 500 }}>2% per subscription charge</span>,
+                <span style={{ color: T.purpleFg, fontWeight: 500 }}>{FREE_RATE_LABEL} per subscription charge</span>,
                 or choose a monthly plan with a{" "}
                 <span style={{ color: T.purpleFg, fontWeight: 500 }}>{TRIAL_DAYS}-day free trial</span>.
               </Text>
@@ -437,7 +400,7 @@ export default function BillingPage() {
               {currentPlan === "advanced"
                 ? "You have access to all features. Manage your plan below."
                 : currentPlan === "free"
-                ? "No monthly fee — you're charged 2% each time a subscription bills. Switch to a paid plan anytime to remove the commission."
+                ? `No monthly fee — you're charged ${FREE_RATE_LABEL} each time a subscription bills. Switch to a paid plan anytime to remove the commission.`
                 : "Upgrade anytime to unlock more features for your store."}
             </Text>
           </div>
@@ -460,13 +423,12 @@ export default function BillingPage() {
                   Commission this month
                 </Text>
                 <Text as="span" variant="bodySm" tone="subdued">
-                  of {formatMoney(commission.cap, commission.currency)} monthly cap
+                  {FREE_RATE_LABEL} per subscription charge
                 </Text>
               </InlineStack>
 
-              {/* Charged and pending, always both. The swatch dots are what tie
-                  each figure to its segment of the bar below — without them the
-                  lighter segment reads as empty track. */}
+              {/* Charged and pending, always both. Pending is dimmed so it never
+                  reads as money already taken. */}
               <div style={{ display: "flex", flexWrap: "wrap", gap: "12px 32px" }}>
                 <div style={{ minWidth: "140px" }}>
                   <InlineStack gap="150" blockAlign="center">
@@ -504,23 +466,11 @@ export default function BillingPage() {
                 </div>
               </div>
 
-              {/* Usage bar. Charged is solid, pending is a lighter segment beside
-                  it. The two widths are clamped to 100% between them, so the bar
-                  stops at the cap even while attempts are still in flight. */}
-              <div style={{ height: "6px", borderRadius: "4px", background: "var(--p-color-bg-surface-secondary)", overflow: "hidden", display: "flex" }}>
-                <div style={{ height: "100%", width: `${chargedPct}%`, background: barColor }} />
-                <div style={{ height: "100%", width: `${pendingPct}%`, background: barColor, opacity: 0.35 }} />
-              </div>
-
               <Text as="p" variant="bodySm" tone="subdued">
                 {commission.capReached
-                  ? "⚠️ You've reached your monthly cap — no further commission can be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally."
-                  : capUsedUp
-                  ? `⚠️ You've used your full ${formatMoney(commission.cap, commission.currency)} cap this month. The next successful charge will not be billed until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally.`
-                  : capReachedByEstimate
-                  ? `Charges still settling are expected to reach your ${formatMoney(commission.cap, commission.currency)} cap this month. Past it, no further commission can be charged until you re-approve a higher cap — your subscriptions keep billing normally.`
-                  : capNearing
-                  ? `⚠️ You're within ${formatMoney(commission.cap - commission.charged, commission.currency)} of your ${formatMoney(commission.cap, commission.currency)} monthly cap. Once it's reached, further commission can't be charged until you re-approve a higher cap or switch to a paid plan. Your subscriptions keep billing normally.`
+                  // Rare at a $1,000 cap, and most likely a shop still on the
+                  // cap it approved before it was raised — see plans.ts.
+                  ? "⚠️ Shopify stopped this month's commission at your approved monthly limit. Re-approve your plan to lift it, or switch to a paid plan. Your subscriptions keep billing normally."
                   : commission.pending > 0
                   ? `Charged automatically each time one of your subscriptions bills successfully. ${commission.pendingCount} charge${commission.pendingCount === 1 ? " is" : "s are"} still settling — pending amounts are estimates and are not billed until the charge succeeds.`
                   : "Charged automatically each time one of your subscriptions bills successfully. Pending is an estimate for charges still settling — it is never billed until the charge succeeds."}
@@ -605,7 +555,7 @@ export default function BillingPage() {
                     </span>
                     <div style={{ fontSize: "12px", color: "var(--p-color-text-subdued)", marginTop: "2px" }}>
                       {plan.commissionRate
-                        ? `+ ${Math.round(plan.commissionRate * 100)}% per subscription charge`
+                        ? `+ ${formatRate(plan.commissionRate)} per subscription charge`
                         : `per month · ${plan.trialDays}-day free trial`}
                     </div>
                   </div>
