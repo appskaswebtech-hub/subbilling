@@ -6,12 +6,17 @@ import { boundary }    from "@shopify/shopify-app-remix/server";
 import { AppProvider } from "@shopify/shopify-app-remix/react";
 import { NavMenu }     from "@shopify/app-bridge-react";
 import polarisStyles   from "@shopify/polaris/build/esm/styles.css?url";
+import themeStyles     from "../styles/theme.css?url";
 import { Text, List }  from "@shopify/polaris";
 import { authenticate }      from "../shopify.server";
 import { getShopPlanFromDB } from "../utils/planUtils";
 import { PLANS, PLAN_ORDER, formatRate } from "../config/plans";
+import { BRAND_GRADIENT } from "../config/theme";
 
-export const links = () => [{ rel: "stylesheet", href: polarisStyles }];
+export const links = () => [
+  { rel: "stylesheet", href: polarisStyles },
+  { rel: "stylesheet", href: themeStyles },   // after Polaris: it restyles it
+];
 
 // Every plan in the catalog counts as chosen, "free" included — it is a real
 // approved Shopify subscription, just a usage-priced one. Only the "none"
@@ -79,7 +84,7 @@ function PlanGatePopup() {
         {/* Header */}
         <div
           style={{
-            background: "linear-gradient(135deg, #26215C 0%, #4F46E5 100%)",
+            background: BRAND_GRADIENT,
             padding:    "28px 32px",
             textAlign:  "center",
           }}
@@ -131,7 +136,7 @@ function PlanGatePopup() {
                     top:           0,
                     left:          "50%",
                     transform:     "translateX(-50%)",
-                    background:    "#4F46E5",
+                    background:    BRAND_GRADIENT,
                     color:         "#ffffff",
                     fontSize:      "11px",
                     fontWeight:    600,
@@ -189,7 +194,7 @@ function PlanGatePopup() {
                     padding:       "10px 0",
                     borderRadius:  "8px",
                     border:        "none",
-                    background:    plan.popular ? "#4F46E5" : "#26215C",
+                    background:    BRAND_GRADIENT,
                     color:         "#ffffff",
                     fontSize:      "14px",
                     fontWeight:    600,
@@ -242,6 +247,7 @@ export default function App() {
         <Link to="/app/plans">Subscription Plans</Link>
         <Link to="/app/bundles">Bundles</Link>
         <Link to="/app/subscriptions">Subscriptions</Link>
+        <Link to="/app/billing">Upgrade Plans</Link>
         <Link to="/app/customers">Customers</Link>
         <Link to="/app/api-key">API Key</Link>
         <Link to="/app/automations">Automations</Link>
@@ -249,7 +255,6 @@ export default function App() {
         <Link to="/app/settings">Settings</Link>
         <Link to="/app/widget-settings">Widget Settings</Link>
         <Link to="/app/cleanup">Clean Plans</Link>
-        <Link to="/app/billing">Upgrade Plans</Link>
         <Link to="/app/support">Help and Support</Link>
       </NavMenu>
 

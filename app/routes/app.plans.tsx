@@ -47,6 +47,7 @@ import {
   type EmailSender,
 } from "../config/payment";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Types ────────────────────────────────────────────────────
@@ -2058,8 +2059,8 @@ function PlanCard({
             disabled={isSubmitting}
             style={{
               flex: 1,
-              background: T.purpleDark,
-              color: T.purpleBg,
+              background: BRAND_GRADIENT,
+              color: "#fff",
               border: "none",
               padding: "9px",
               borderRadius: "9px",
@@ -2876,6 +2877,7 @@ export default function Plans() {
               <Text as="p" variant="bodySm" tone="subdued">
                 Create and manage smart subscription plans for your products
               </Text>
+              <span className="kas-title-underline" />
             </BlockStack>
 
             <div style={{ position: "relative" }}>

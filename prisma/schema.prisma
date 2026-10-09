@@ -353,8 +353,19 @@ model ProductBundle {
   paymentEmailSender String   @default("SHOPIFY")
   shopifyGroupId       String?
   shopifySellingPlanId String?
+  // The Shopify product a recurring bundle is sold as, so cart, checkout, the
+  // subscription and its orders show ONE line (Shopify won't merge lines that
+  // have a selling plan). Created by the app on save: status UNLISTED (bought
+  // only through the bundle block), subscription-only, priced at the bundle
+  // price. The bundle's selling plan group is attached to it rather than to
+  // the items. Null on one-time bundles and on recurring bundles saved before
+  // this existed, which still add one line per item until saved again.
+  bundleProductId      String?
+  bundleVariantId      String?
+  // Its storefront handle, for /products/<handle>.js and the cart.
+  bundleProductHandle  String?
 
-  items              ProductBundleItem[]
+  items             ProductBundleItem[]
   baseProducts       ProductBundleBase[]
 
   createdAt          DateTime @default(now())

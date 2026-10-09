@@ -13,6 +13,7 @@ import { TitleBar }          from "@shopify/app-bridge-react";
 import { authenticate }      from "../shopify.server";
 import { PLANS, PLAN_KEYS, PLAN_ORDER, formatRate, FREE_RATE_LABEL } from "../config/plans";
 import { resolveBillingCurrency, localizedCap, localizedPrice, formatMoney } from "../config/currency";
+import { BRAND_GRADIENT } from "../config/theme";
 
 // The currency this shop pays Shopify for apps in. Every charge must match it.
 const SHOP_BILLING_CURRENCY_QUERY = `#graphql
@@ -366,7 +367,7 @@ export default function BillingPage() {
           </BlockStack>
           <button
             onClick={() => setShowCompare(true)}
-            style={{ ...btn, border: `0.5px solid var(--p-color-border-secondary)`, background: "var(--p-color-bg-surface)", marginTop: "4px" }}
+            style={{ ...btn, border: "none", background: BRAND_GRADIENT, color: "#fff", fontWeight: 600, marginTop: "4px" }}
           >
             ⊞ Compare features
           </button>
@@ -590,9 +591,9 @@ export default function BillingPage() {
                       style={{
                         width: "100%", padding: "9px", borderRadius: "9px",
                         fontSize: "13px", fontWeight: 600,
-                        border: `0.5px solid ${T.greenDot}`,
-                        background: T.greenBg, color: T.greenFg,
-                        cursor: "not-allowed",
+                        border: "none",
+                        background: BRAND_GRADIENT, color: "#fff",
+                        cursor: "default",
                       }}
                     >
                       ✓ Current Plan
@@ -608,7 +609,7 @@ export default function BillingPage() {
                           width: "100%", padding: "9px", borderRadius: "9px",
                           fontSize: "13px", fontWeight: 600,
                           border: plan.popular ? "none" : `0.5px solid var(--p-color-border-secondary)`,
-                          background: plan.popular ? T.purpleDark : "var(--p-color-bg-surface)",
+                          background: plan.popular ? BRAND_GRADIENT : "var(--p-color-bg-surface)",
                           color:      plan.popular ? "#fff" : "var(--p-color-text)",
                           cursor: isSubmitting ? "not-allowed" : "pointer",
                           opacity: isSubmitting && submittingPlan !== plan.key ? 0.6 : 1,

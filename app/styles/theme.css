@@ -1,0 +1,104 @@
+/*
+ * The admin app's look on every page (linked from app/routes/app.tsx): the
+ * gradient backdrop and Polaris buttons and cards restyled to match. Buttons
+ * that pages style inline take the same values from app/config/theme.ts; keep
+ * the two in step.
+ */
+:root {
+  --kas-page-gradient:  linear-gradient(120deg, #DCEBFA 0%, #E9E4FA 50%, #FBE7F3 100%);
+  --kas-brand-gradient: linear-gradient(90deg, #0EA5F5 0%, #3D5AFE 45%, #E81CD0 100%);
+  --kas-soft-gradient:  linear-gradient(90deg, #DCEEFD 0%, #E4E2FC 50%, #FADDF4 100%);
+  --kas-danger:         #E03E3E;
+}
+
+/* ── Backdrop ── */
+html, body {
+  min-height: 100%;
+  background: var(--kas-page-gradient) fixed;
+}
+.Polaris-Frame,
+.Polaris-Frame__Content,
+.Polaris-Page {
+  background: transparent;
+}
+
+/* ── Polaris buttons ── */
+.Polaris-Button.Polaris-Button--variantPrimary:not(.Polaris-Button--toneCritical) {
+  background: var(--kas-brand-gradient);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(61, 90, 254, 0.25);
+  --pc-button-bg: transparent;
+  --pc-button-bg_hover: transparent;
+  --pc-button-bg_active: transparent;
+  --pc-button-box-shadow: none;
+  --pc-button-box-shadow_active: none;
+}
+.Polaris-Button.Polaris-Button--variantPrimary:not(.Polaris-Button--toneCritical)::before {
+  display: none;   /* Polaris's bevel highlight */
+}
+.Polaris-Button.Polaris-Button--variantPrimary:not(.Polaris-Button--toneCritical):hover {
+  filter: brightness(1.06);
+}
+.Polaris-Button.Polaris-Button--variantPrimary:not(.Polaris-Button--toneCritical):active {
+  filter: brightness(0.95);
+}
+.Polaris-Button.Polaris-Button--variantPrimary.Polaris-Button--disabled:not(.Polaris-Button--toneCritical) {
+  opacity: 0.55;
+  color: #fff;
+}
+.Polaris-Button.Polaris-Button--variantPrimary:not(.Polaris-Button--toneCritical) .Polaris-Icon svg {
+  fill: #fff;
+}
+
+.Polaris-Button.Polaris-Button--variantSecondary:not(.Polaris-Button--toneCritical) {
+  background: #fff;
+  border: 1px solid #D9D9E3;
+  border-radius: 8px;
+  box-shadow: none;
+}
+.Polaris-Button.Polaris-Button--variantSecondary:not(.Polaris-Button--toneCritical):hover {
+  background: #F7F7FB;
+}
+
+/* Destructive: a red outline pill. */
+.Polaris-Button.Polaris-Button--toneCritical:not(.Polaris-Button--variantPlain):not(.Polaris-Button--variantTertiary) {
+  background: transparent;
+  color: var(--kas-danger);
+  border: 1px solid var(--kas-danger);
+  border-radius: 999px;
+  box-shadow: none;
+  --pc-button-bg: transparent;
+  --pc-button-bg_hover: #FDECEC;
+  --pc-button-bg_active: #FBDADA;
+  --pc-button-color: var(--kas-danger);
+  --pc-button-color_hover: var(--kas-danger);
+  --pc-button-color_active: var(--kas-danger);
+  --pc-button-box-shadow: none;
+}
+.Polaris-Button.Polaris-Button--toneCritical:not(.Polaris-Button--variantPlain):not(.Polaris-Button--variantTertiary)::before {
+  display: none;
+}
+.Polaris-Button.Polaris-Button--toneCritical:not(.Polaris-Button--variantPlain):not(.Polaris-Button--variantTertiary) .Polaris-Icon svg {
+  fill: var(--kas-danger);
+}
+
+/* ── Cards: white and rounded, so they read on the gradient ── */
+.Polaris-ShadowBevel {
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(38, 33, 92, 0.08);
+}
+.Polaris-ShadowBevel::before {
+  box-shadow: none;
+}
+
+/* ── A short gradient bar under a page title ── */
+.kas-title-underline {
+  display: block;
+  width: 48px;
+  height: 3px;
+  margin-top: 8px;
+  border-radius: 3px;
+  background: var(--kas-brand-gradient);
+}

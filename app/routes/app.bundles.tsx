@@ -34,6 +34,7 @@ import {
   Select,
   Thumbnail,
   EmptyState,
+  Link,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -69,6 +70,7 @@ import {
   type PricingMode,
 } from "../config/bundle-pricing";
 import { BundlePreview, MiniBundlePreview, type PreviewItem } from "../components/BundlePreview";
+import { BRAND_GRADIENT } from "../config/theme";
 
 const ACCENT = "#5B4FCB";
 
@@ -379,18 +381,23 @@ function toEditorItems(stored: StoredItem[], products: Record<string, ProductInf
   return { items: [...byProduct.values()], collapsed };
 }
 
-function toPreviewItems(items: EditorItem[], products: Record<string, ProductInfo>): PreviewItem[] {
+/**
+ * `fixedVariants`: a recurring bundle, sold as one product, where every item
+ * is the variant picked here and the shopper chooses nothing.
+ */
+function toPreviewItems(items: EditorItem[], products: Record<string, ProductInfo>, fixedVariants = false): PreviewItem[] {
   return items.map((i) => {
     const info    = products[i.productId];
     const variant = info?.variants.find((v) => v.id === i.variantId) ?? info?.variants[0];
+    const choice  = i.variantChoice && !fixedVariants;
     return {
       key:           i.productId,
       title:         info?.title ?? i.title,
       imageUrl:      info?.imageUrl ?? null,
       price:         variant ? variant.price : null,
       quantity:      Math.max(1, Number(i.quantity) || 1),
-      variantChoice: i.variantChoice,
-      variantLabel:  i.variantChoice
+      variantChoice: choice,
+      variantLabel:  choice || fixedVariants
         ? (isDefaultTitle(variant?.title) ? null : variant?.title ?? null)
         : i.variantTitle,
     };
@@ -441,15 +448,19 @@ function StatTile({ label, value, tint }: { label: string; value: number; tint: 
   );
 }
 
-function OptionTile({ selected, title, description, onClick }: { selected: boolean; title: string; description: string; onClick: () => void }) {
+function OptionTile({ selected, title, description, onClick, disabled = false }: {
+  selected: boolean; title: string; description: string; onClick: () => void; disabled?: boolean;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       style={{
-        textAlign: "left", cursor: "pointer", padding: "12px 14px", borderRadius: 12, width: "100%",
+        textAlign: "left", cursor: disabled ? "not-allowed" : "pointer", padding: "12px 14px", borderRadius: 12, width: "100%",
         border: selected ? `2px solid ${ACCENT}` : "1px solid var(--p-color-border)",
         background: selected ? "#F5F3FF" : "var(--p-color-bg-surface)",
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       <BlockStack gap="100">
@@ -514,9 +525,32 @@ export default function Bundles() {
   }
 
   function openEdit(b: (typeof bundles)[number]) {
-    const { items, collapsed } = toEditorItems(b.items, products);
+    const { editor: state, collapsed } = editorFrom(b);
+    setCollapsedNotice(collapsed);
+    setEditor(state);
+  }
+
+  /**
+   * A new bundle prefilled from `b`, saved only when the merchant presses
+   * Create. A recurring bundle's copy is one-time: the only kind Shopify shows
+   * as one bundle with its items (and their images) in cart and checkout.
+   */
+  function openDuplicate(b: (typeof bundles)[number]) {
+    const { editor: state, collapsed } = editorFrom(b);
+    const recurring = state.type === "RECURRING";
     setCollapsedNotice(collapsed);
     setEditor({
+      ...state,
+      id:   null,
+      name: `${b.name} (${recurring ? "one-time" : "copy"})`,
+      type: recurring ? "ONE_TIME" : state.type,
+    });
+  }
+
+  /** The editor state for a saved bundle. */
+  function editorFrom(b: (typeof bundles)[number]): { editor: EditorState; collapsed: boolean } {
+    const { items, collapsed } = toEditorItems(b.items, products);
+    return { collapsed, editor: {
       id:                 b.id,
       name:               b.name,
       type:               b.type === "ONE_TIME" ? "ONE_TIME" : "RECURRING",
@@ -540,7 +574,7 @@ export default function Bundles() {
       paymentMode:        parsePaymentMode(b.paymentMode),
       paymentEmailSender: parseEmailSender(b.paymentEmailSender),
       items,
-    });
+    } };
   }
 
   async function pickProducts() {
@@ -653,9 +687,36 @@ export default function Bundles() {
       handle:        i.handle,
       title:         i.title,
       quantity:      Number(i.quantity) || 1,
-      variantChoice: i.variantChoice,
+      // A recurring bundle is one product with fixed contents: each item is
+      // the variant picked in the editor.
+      variantChoice: editor.type === "RECURRING" ? false : i.variantChoice,
     }))));
     submit(fd, { method: "post" });
+  }
+
+  // A recurring bundle is sold as one product with fixed contents: a fixed set
+  // (no box) at % off or a fixed price (no tiers).
+  function setType(type: "RECURRING" | "ONE_TIME") {
+    setEditor((e) => (e ? {
+      ...e,
+      type,
+      ...(type === "RECURRING" ? { kind: "SET" as const, pricingMode: e.pricingMode === "TIERED" ? "PERCENT" as const : e.pricingMode } : {}),
+    } : e));
+  }
+
+  /** A recurring bundle's item: which variant goes in it. */
+  function setItemVariant(idx: number, variantId: string) {
+    setEditor((e) => {
+      if (!e) return e;
+      return {
+        ...e,
+        items: e.items.map((it, i) => {
+          if (i !== idx) return it;
+          const variant = products[it.productId]?.variants.find((v) => v.id === variantId);
+          return { ...it, variantId, variantTitle: isDefaultTitle(variant?.title) ? null : variant?.title ?? null };
+        }),
+      };
+    });
   }
 
   // A box can't have a fixed price: switching to a box moves it to % off.
@@ -717,7 +778,7 @@ export default function Bundles() {
     const recurring    = editor.type === "RECURRING";
     const box          = editor.kind === "BOX";
     const mode         = editor.pricingMode;
-    const previewItems = toPreviewItems(editor.items, products);
+    const previewItems = toPreviewItems(editor.items, products, recurring);
     // Today's price of the set: the default / fixed variants at their quantities.
     const listKnown    = previewItems.length > 0 && previewItems.every((i) => i.price !== null);
     const listTotal    = previewItems.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
@@ -737,6 +798,8 @@ export default function Bundles() {
       fixedPrice:      fixedPrice || null,
       minItems:        Number(editor.minItems) || 0,
       tiers:           parseTiers(editor.tiers),
+      // Recurring: sold as one product, contents fixed.
+      locked:          recurring,
     };
 
     return (
@@ -778,14 +841,14 @@ export default function Bundles() {
                       <OptionTile
                         selected={recurring}
                         title="Recurring"
-                        description="Renews together as one subscription."
-                        onClick={() => update("type", "RECURRING")}
+                        description="Sold as one product that renews as one subscription line."
+                        onClick={() => setType("RECURRING")}
                       />
                       <OptionTile
                         selected={!recurring}
                         title="One-time"
                         description="Bought once at the bundle price."
-                        onClick={() => update("type", "ONE_TIME")}
+                        onClick={() => setType("ONE_TIME")}
                       />
                     </InlineGrid>
                     <Text as="h3" variant="headingSm">Bundle type</Text>
@@ -793,14 +856,19 @@ export default function Bundles() {
                       <OptionTile
                         selected={!box}
                         title="Fixed set"
-                        description="The products you choose, together. Shoppers can untick what they don't want."
+                        description={recurring
+                          ? "The products you choose, always together."
+                          : "The products you choose, together. Shoppers can untick what they don't want."}
                         onClick={() => setKind("SET")}
                       />
                       <OptionTile
                         selected={box}
                         title="Build-your-own box"
-                        description="Shoppers pick any mix of your products, at least a set number."
+                        description={recurring
+                          ? "One-time bundles only: a recurring bundle is one product with fixed contents."
+                          : "Shoppers pick any mix of your products, at least a set number."}
                         onClick={() => setKind("BOX")}
+                        disabled={recurring}
                       />
                     </InlineGrid>
                   </BlockStack>
@@ -815,11 +883,31 @@ export default function Bundles() {
                         <Text as="p" variant="bodySm" tone="subdued">
                           {box
                             ? "Shoppers fill their box from these, in any mix, and can take the same product more than once. Pick whole products to let them choose size and colour."
+                            : recurring
+                            ? "Choose the size or colour of each product below. Shoppers get exactly this set."
                             : "Pick whole products to let shoppers choose size and colour, or tick one variant to fix it. Shoppers can untick items they don't want; the discount applies to what they keep."}
                         </Text>
                       </BlockStack>
                       <Button onClick={pickProducts}>{editor.items.length ? "Change products" : "Select products"}</Button>
                     </InlineStack>
+
+                    {recurring ? (
+                      <Banner tone="info" title="Sold as one product">
+                        <Text as="p">
+                          Saving creates a product for this bundle in Shopify. It's unlisted, so it stays out of your catalog,
+                          collections and search. Customers subscribe to it as one line in the cart, at checkout and on every
+                          order, with an "Includes" note listing these items.
+                        </Text>
+                      </Banner>
+                    ) : (
+                      <Banner tone="info" title="One bundle in cart and checkout">
+                        <Text as="p">
+                          Saving creates an unlisted product for this bundle in Shopify. In the cart and at checkout, the items
+                          the shopper picks are grouped under it as one bundle, each with its own image. Each item is still
+                          ordered, stocked and shipped on its own.
+                        </Text>
+                      </Banner>
+                    )}
 
                     {itemsWarning && (
                       <Banner tone="critical">
@@ -848,7 +936,20 @@ export default function Bundles() {
                               <div style={{ flex: 1, minWidth: 0 }}>
                                 <Text as="p" fontWeight="medium" truncate>{info?.title ?? item.title}</Text>
                                 <InlineStack gap="150" blockAlign="center">
-                                  {item.variantChoice
+                                  {recurring && (info?.variants.length ?? 0) > 1
+                                    // Fixed contents: the merchant picks the variant.
+                                    ? (
+                                      <div style={{ minWidth: 160, marginTop: 4 }}>
+                                        <Select
+                                          label="Variant"
+                                          labelHidden
+                                          options={info!.variants.map((v) => ({ label: v.title, value: v.id }))}
+                                          value={item.variantId}
+                                          onChange={(v) => setItemVariant(idx, v)}
+                                        />
+                                      </div>
+                                    )
+                                    : item.variantChoice && !recurring
                                     ? <Badge tone="info">Shopper picks size / colour</Badge>
                                     : item.variantTitle
                                     ? <Text as="p" variant="bodySm" tone="subdued">{item.variantTitle}</Text>
@@ -983,7 +1084,9 @@ export default function Bundles() {
                 <Card>
                   <BlockStack gap="300">
                     <Text as="h2" variant="headingMd">Pricing</Text>
-                    <InlineGrid columns={{ xs: 1, sm: box ? 2 : 3 }} gap="300">
+                    {/* Boxes can't have a fixed price; recurring bundles (fixed
+                        contents, so a fixed count) can't have tiers. */}
+                    <InlineGrid columns={{ xs: 1, sm: box || recurring ? 2 : 3 }} gap="300">
                       <OptionTile
                         selected={mode === "PERCENT"}
                         title="% off"
@@ -998,12 +1101,14 @@ export default function Bundles() {
                           onClick={() => update("pricingMode", "FIXED_PRICE")}
                         />
                       )}
-                      <OptionTile
-                        selected={mode === "TIERED"}
-                        title="Tiered by quantity"
-                        description="The more items, the bigger the discount."
-                        onClick={() => update("pricingMode", "TIERED")}
-                      />
+                      {!recurring && (
+                        <OptionTile
+                          selected={mode === "TIERED"}
+                          title="Tiered by quantity"
+                          description="The more items, the bigger the discount."
+                          onClick={() => update("pricingMode", "TIERED")}
+                        />
+                      )}
                     </InlineGrid>
 
                     {mode === "PERCENT" && (
@@ -1022,7 +1127,7 @@ export default function Bundles() {
                           {box
                             ? `Applied to everything in the box once the shopper has picked at least ${Number(editor.minItems) || 1}.`
                             : recurring
-                            ? "Applied to every item the shopper keeps ticked, on every delivery."
+                            ? "Taken off the bundle's price on every delivery."
                             : "Applied at checkout to every item the shopper keeps ticked, in any size or colour."}
                         </Text>
                       </BlockStack>
@@ -1051,7 +1156,7 @@ export default function Bundles() {
                         )}
                         <Text as="p" variant="bodySm" tone="subdued">
                           {recurring
-                            ? `A subscription plan can't hold a set price, so each delivery gets the matching percentage${matching ? ` (about ${matching}%)` : ""}, worked out from today's prices when you save. If prices change, save the bundle again.`
+                            ? "Charged exactly, on every delivery. The bundle's product is priced at today's list total when you save, so save again if the items' prices change."
                             : "Charged exactly at checkout when the shopper keeps the whole set. If they untick items, what they keep gets the matching percentage."}
                         </Text>
                       </BlockStack>
@@ -1100,11 +1205,7 @@ export default function Bundles() {
                           <Button onClick={addTier} disabled={editor.tiers.length >= MAX_TIERS}>Add tier</Button>
                         </InlineStack>
                         <Text as="p" variant="bodySm" tone="subdued">
-                          {`The highest tier reached applies to every ${box ? "item in the box" : "item the shopper keeps ticked"}. `}
-                          {recurring
-                            ? "Each tier gets its own subscription plan, so the discount stays the same on every delivery."
-                            : "Applied at checkout."}
-                          {` Up to ${MAX_TIERS} tiers.`}
+                          {`The highest tier reached applies to every ${box ? "item in the box" : "item the shopper keeps ticked"}, at checkout. Up to ${MAX_TIERS} tiers.`}
                         </Text>
                       </BlockStack>
                     )}
@@ -1229,7 +1330,8 @@ export default function Bundles() {
 
   // ═══ List view ═════════════════════════════════════════════
   const selected       = bundles.find((b) => b.id === selectedId) ?? null;
-  const selectedItems  = selected ? toPreviewItems(toEditorItems(selected.items, products).items, products) : [];
+  const selectedLocked = selected?.type === "RECURRING" && !!selected.bundleVariantId;
+  const selectedItems  = selected ? toPreviewItems(toEditorItems(selected.items, products).items, products, selectedLocked) : [];
   const previewDesign  = peekDesign ?? (selected ? parseBundleDesign(selected.design) : "classic");
   const selectedIsBox  = selected?.kind === "BOX";
 
@@ -1269,9 +1371,15 @@ export default function Bundles() {
               <BlockStack gap="300">
                 {bundles.map((b) => {
                   const grouped    = toEditorItems(b.items, products).items;
-                  const items      = toPreviewItems(grouped, products);
+                  // Its product is live: a recurring bundle is sold as it, a
+                  // one-time bundle's lines are grouped under it in the cart.
+                  const hasProduct = !!b.bundleVariantId;
+                  const asProduct  = b.type === "RECURRING" && hasProduct;
+                  const items      = toPreviewItems(grouped, products, asProduct);
                   const isSelected = b.id === selectedId;
                   const notLive    = b.type === "RECURRING" && !b.shopifySellingPlanId;
+                  // Saved before bundles had their own product, or it isn't live yet.
+                  const perItem    = !hasProduct && (b.type === "ONE_TIME" || !!b.shopifySellingPlanId);
                   const isBox      = b.kind === "BOX";
                   const offStore   = offStoreWarning(b.kind, grouped, products);
                   const offBases   = b.showOn === "BASE" ? offStoreTitles(b.baseProducts, products) : [];
@@ -1346,6 +1454,28 @@ export default function Bundles() {
                                 Its subscription plan isn't set up in Shopify yet, so it isn't on the storefront. Open it and save again.
                               </Text>
                             )}
+                            {hasProduct && b.bundleProductId && (
+                              <Text as="p" variant="bodySm" tone="subdued">
+                                {asProduct
+                                  ? "Sold as one product, one line in the cart and on orders."
+                                  : "Shown as one bundle in cart and checkout, with its items underneath."}{" "}
+                                <Link url={`shopify://admin/products/${b.bundleProductId.split("/").pop()}`} target="_top">
+                                  View it in Shopify
+                                </Link>
+                              </Text>
+                            )}
+                            {perItem && (
+                              <Text as="p" tone="caution" variant="bodySm">
+                                {`${b.type === "RECURRING" ? "Adds one cart line per item" : "Shows as separate lines in the cart"}. `}
+                                {b.bundleProductId
+                                  // Created, but publishing it to the Online Store failed:
+                                  // usually a permission not approved yet.
+                                  ? "Its product exists but isn't on your Online Store yet. Approve the app's updated permissions, then open the bundle and save again; if it still fails, the message says why."
+                                  : b.type === "RECURRING"
+                                  ? "Open it and save to sell it as one product."
+                                  : "Open it and save to group it into one bundle."}
+                              </Text>
+                            )}
                             {offStore && <Text as="p" tone="critical" variant="bodySm">{offStore}</Text>}
                             {offBases.length > 0 && (
                               <Text as="p" tone="critical" variant="bodySm">
@@ -1357,6 +1487,7 @@ export default function Bundles() {
                         <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()} role="presentation">
                           <InlineStack gap="200" wrap={false}>
                             <Button size="slim" onClick={() => openEdit(b)} disabled={busy}>Edit</Button>
+                            <Button size="slim" onClick={() => openDuplicate(b)} disabled={busy}>Duplicate</Button>
                             <Button size="slim" onClick={() => toggle(b.id, !b.active)} disabled={busy}>
                               {b.active ? "Turn off" : "Turn on"}
                             </Button>
@@ -1394,8 +1525,8 @@ export default function Bundles() {
                           onClick={() => setPeekDesign(d.value)}
                           style={{
                             fontSize: 12, padding: "5px 10px", borderRadius: 999, cursor: "pointer",
-                            border: on ? `1px solid ${ACCENT}` : "1px solid var(--p-color-border)",
-                            background: on ? ACCENT : "var(--p-color-bg-surface)",
+                            border: on ? "1px solid transparent" : "1px solid var(--p-color-border)",
+                            background: on ? BRAND_GRADIENT : "var(--p-color-bg-surface)",
                             color: on ? "#fff" : "var(--p-color-text)", fontWeight: on ? 600 : 400,
                           }}
                         >
@@ -1423,6 +1554,7 @@ export default function Bundles() {
                       fixedPrice={selected?.fixedPrice ?? null}
                       minItems={selected?.minItems ?? 0}
                       tiers={selected ? parseTiers(selected.tiersJson) : []}
+                      locked={selectedLocked}
                     />
                   </div>
 

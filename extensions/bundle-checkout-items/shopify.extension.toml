@@ -1,0 +1,27 @@
+# Item images under recurring bundle lines: in the checkout order summary, on
+# the Thank you page and on the Order status page. See src/BundleItems.jsx.
+# https://shopify.dev/docs/api/checkout-ui-extensions/latest/configuration
+
+api_version = "2026-07"
+
+[[extensions]]
+name = "Bundle items"
+handle = "bundle-checkout-items"
+type = "ui_extension"
+uid = "32994aae-056c-4f6d-f521-dce20ecda60c8c452be5"
+
+# Static targets: rendered once per line, under the line's properties. The
+# merchant activates the extension once in the checkout editor. Checkout
+# targets only run on Shopify Plus stores (and development stores).
+[[extensions.targeting]]
+module = "./src/BundleItems.jsx"
+target = "purchase.checkout.cart-line-item.render-after"
+
+[[extensions.targeting]]
+module = "./src/BundleItems.jsx"
+target = "purchase.thank-you.cart-line-item.render-after"
+
+# Order status page, in new customer accounts (all plans).
+[[extensions.targeting]]
+module = "./src/BundleItems.jsx"
+target = "customer-account.order-status.cart-line-item.render-after"

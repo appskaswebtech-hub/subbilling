@@ -43,7 +43,12 @@ export interface BundlePreviewProps {
   buttonLabel?:    string;
   kind?:           BundleKind;
   pricingMode?:    PricingMode;
-  /** The full set's price. Exact for one-time bundles only. */
+  /**
+   * A recurring bundle sold as one product: fixed contents, so no ticks or
+   * size choice, and a fixed price is exact.
+   */
+  locked?:         boolean;
+  /** The full set's price. Exact for one-time bundles and locked ones. */
   fixedPrice?:     number | null;
   /** Boxes: shoppers pick at least this many. */
   minItems?:       number;
@@ -183,7 +188,7 @@ export function BundlePreview(props: BundlePreviewProps) {
   const {
     design, name, discountPercent, items, frequency, prepaid, currency,
     accent = "#5B4FCB", buttonLabel = "Add bundle to cart",
-    kind = "SET", pricingMode = "PERCENT", fixedPrice = null, minItems = 0, tiers = [],
+    kind = "SET", pricingMode = "PERCENT", fixedPrice = null, minItems = 0, tiers = [], locked = false,
   } = props;
 
   const box        = kind === "BOX";
@@ -192,8 +197,9 @@ export function BundlePreview(props: BundlePreviewProps) {
   const shown      = box ? boxExample(items, min) : items;
   const units      = shown.reduce((s, i) => s + i.quantity, 0);
   const percent    = tiered ? tierPercent(tiers, units) : discountPercent || 0;
-  // Exact only for one-time sets; recurring ones use the matching percentage.
-  const fixed      = pricingMode === "FIXED_PRICE" && !box && !frequency && fixedPrice ? fixedPrice : null;
+  // Exact for one-time sets and bundles sold as one product; older recurring
+  // bundles (one line per item) use the matching percentage.
+  const fixed      = pricingMode === "FIXED_PRICE" && !box && (!frequency || locked) && fixedPrice ? fixedPrice : null;
 
   const known      = shown.every((i) => i.price !== null);
   const total      = shown.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
@@ -272,7 +278,7 @@ export function BundlePreview(props: BundlePreviewProps) {
               <div style={{ width: 88 }}>
                 <div style={{ position: "relative", width: 80 }}>
                   <Thumb item={item} size={80} />
-                  <Tick accent={accent} overlay />
+                  {!locked && <Tick accent={accent} overlay />}
                 </div>
                 <div style={{ fontSize: 11, marginTop: 6, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                   {item.quantity > 1 ? `${item.quantity} × ` : ""}{item.title}
@@ -330,7 +336,7 @@ export function BundlePreview(props: BundlePreviewProps) {
         </div>
         {ladder && <div style={{ margin: "6px 0 0 4px" }}>{ladder}</div>}
         {/* Ticks (and size/colour choices) live in here on the storefront. */}
-        <div style={{ fontSize: 11, color: accent, margin: "4px 0 0 4px", fontWeight: 600 }}>Customize bundle ▾</div>
+        <div style={{ fontSize: 11, color: accent, margin: "4px 0 0 4px", fontWeight: 600 }}>{locked ? "What's included ▾" : "Customize bundle ▾"}</div>
       </div>
     );
   }
@@ -387,7 +393,7 @@ export function BundlePreview(props: BundlePreviewProps) {
       </div>
       {shown.map((item) => (
         <div key={item.key} style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, marginBottom: 8 }}>
-          <Tick accent={accent} />
+          {!locked && <Tick accent={accent} />}
           <Thumb item={item} size={44} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div>{item.title}</div>

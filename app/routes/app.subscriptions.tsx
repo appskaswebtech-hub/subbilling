@@ -35,6 +35,7 @@ import {
 import { backfillContracts } from "../lib/subscription-backfill.server";
 import { syncCommissionFromShopify, type CommissionSyncSummary } from "../lib/commission-sync.server";
 import { resendInvoice, cancelInitialInvoice } from "../lib/prepaid.server";
+import { BRAND_GRADIENT, SOFT_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 const PAGE_SIZE = 20;
@@ -1454,10 +1455,11 @@ export default function Subscriptions() {
               gap:          "6px",
               fontSize:     "13px",
               padding:      "10px 20px",
-              border:       "0.5px solid var(--p-color-border-secondary)",
+              border:       "none",
               borderRadius: "8px",
-              background:   "var(--p-color-bg-surface)",
-              color:        "var(--p-color-text)",
+              background:   SOFT_GRADIENT,
+              color:        "#26215C",
+              fontWeight:   600,
               cursor:       isSyncing ? "wait" : "pointer",
               whiteSpace:   "nowrap",
               opacity:      isSyncing ? 0.7 : 1,
@@ -1476,10 +1478,10 @@ export default function Subscriptions() {
               gap:          "6px",
               fontSize:     "13px",
               padding:      "10px 20px",
-              border:       "0.5px solid var(--p-color-border-secondary)",
+              border:       "none",
               borderRadius: "8px",
-              background:   "var(--p-color-bg-surface)",
-              color:        "var(--p-color-text)",
+              background:   BRAND_GRADIENT,
+              color:        "#fff",
               cursor:       revalidator.state === "loading" ? "wait" : "pointer",
               whiteSpace:   "nowrap",
               opacity:      revalidator.state === "loading" ? 0.7 : 1,

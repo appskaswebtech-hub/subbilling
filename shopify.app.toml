@@ -1,8 +1,8 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "72e2c177c84e8fb0b9f4ee027fa0cafa"
-name = "Smart Subscriptions"
-application_url = "https://subscription.kaswebtechsolutions.com"
+client_id = "f90051b6e905ff35d1920efa4d6a5e1a"
+name = "staging-kas-subscription"
+application_url = "https://staging-subscription.kaswebtechsolutions.com"
 embedded = true
 
 [build]
@@ -12,31 +12,35 @@ automatically_update_urls_on_dev = true
 api_version = "2026-04"
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/app/scopes_update"
-  topics = [ "app/scopes_update" ]
-
-  [[webhooks.subscriptions]]
-  uri = "/webhooks"
+  uri = "https://subscription.kaswebtechsolutions.com/webhooks"
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
   topics = [
-  "subscription_contracts/create",
   "subscription_billing_attempts/failure",
+  "subscription_contracts/create",
   "subscription_contracts/update",
   "subscription_billing_attempts/success"
 ]
-  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
 
   [[webhooks.subscriptions]]
-  uri = "/webhooks/app/uninstalled"
+  uri = "https://subscription.kaswebtechsolutions.com/webhooks/app/uninstalled"
   topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "https://subscription.kaswebtechsolutions.com/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "customer_read_customers,customer_read_own_subscription_contracts,read_all_orders,read_customer_payment_methods,read_customers,read_orders,read_own_subscription_contracts,read_products,write_customers,write_own_subscription_contracts,write_products,write_purchase_options"
+scopes = "customer_read_customers,customer_read_own_subscription_contracts,customer_write_own_subscription_contracts,read_cart_transforms,read_customer_payment_methods,read_customers,read_draft_orders,read_files,read_inventory,read_orders,read_own_subscription_contracts,read_products,read_publications,read_purchase_options,write_cart_transforms,write_customers,write_draft_orders,write_files,write_own_subscription_contracts,write_products,write_publications,write_purchase_options"
+optional_scopes = [ ]
+use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ "https://subscription.kaswebtechsolutions.com/api/auth" ]
+redirect_urls = [
+  "https://staging-subscription.kaswebtechsolutions.com/auth/callback"
+]
 
 [app_proxy]
-url = "https://subscription.kaswebtechsolutions.com/apps/subscriptions"
+url = "https://staging-subscription.kaswebtechsolutions.com"
 subpath = "subscriptions"
 prefix = "apps"

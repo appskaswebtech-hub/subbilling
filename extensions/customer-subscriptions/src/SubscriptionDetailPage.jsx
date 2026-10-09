@@ -35,6 +35,8 @@ const SUBSCRIPTION_QUERY = `
                   quantity
                   image { url altText }
                   currentPrice { amount currencyCode }
+                  # A recurring bundle's items, from its cart line: _kas_items.
+                  customAttributes { key value }
                 }
               }
             }
@@ -48,6 +50,25 @@ const SUBSCRIPTION_QUERY = `
 const GQL_ENDPOINT = "shopify://customer-account/api/2026-04/graphql.json";
 
 // ─── Helpers ──────────────────────────────────────────────────────
+
+/**
+ * A recurring bundle's items from its line's hidden `_kas_items` attribute
+ * (written by the storefront bundle block): [{ t: name, q: quantity, i: image
+ * URL }]. [] for any other line, or if it's malformed.
+ */
+function bundleItemsOf(attributes) {
+  var raw = (attributes || []).find(function (a) { return a && a.key === "_kas_items"; });
+  if (!raw || !raw.value) return [];
+  try {
+    var list = JSON.parse(raw.value);
+    return Array.isArray(list)
+      ? list.filter(function (x) { return x && typeof x.t === "string" && x.t; }).slice(0, 20)
+      : [];
+  } catch (e) {
+    return [];
+  }
+}
+
 function norm(s) {
   return s ? s.toString().toUpperCase().trim() : "UNKNOWN";
 }
@@ -220,6 +241,7 @@ function SubscriptionDetailPage() {
             currency: l.currentPrice.currencyCode,
             imgUrl:   l.image ? l.image.url : null,
             imgAlt:   l.image ? (l.image.altText || l.title) : l.title,
+            bundleItems: bundleItemsOf(l.customAttributes),
           };
         });
 
@@ -432,6 +454,27 @@ function SubscriptionDetailPage() {
                       </s-paragraph>
                     </s-stack>
                   </s-grid>
+
+                  {/* A recurring bundle: what's in it, each with its image. */}
+                  {line.bundleItems.length > 0 && (
+                    <s-stack direction="block" gap="small-200" paddingBlockStart="base">
+                      {line.bundleItems.map(function (item, idx) {
+                        return (
+                          <s-grid key={idx} gridTemplateColumns="40px 1fr" gap="base" alignItems="center">
+                            {item.i
+                              ? <s-image src={item.i} alt={item.t} aspectRatio="1/1" objectFit="cover" borderRadius="base" inlineSize="fill" />
+                              : <s-box />}
+                            <s-stack direction="block" gap="none">
+                              <s-text>{(item.q > 0 ? item.q : 1) + " × " + item.t}</s-text>
+                              {typeof item.v === "string" && item.v
+                                ? <s-text type="small" color="subdued">{item.v}</s-text>
+                                : null}
+                            </s-stack>
+                          </s-grid>
+                        );
+                      })}
+                    </s-stack>
+                  )}
                 </s-box>
               );
             })}

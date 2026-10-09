@@ -1,0 +1,44 @@
+query CartTransformRunInput {
+  # Shop currency → the shopper's. A fixed bundle price is stored in the shop
+  # currency; cart prices are in the shopper's.
+  presentmentCurrencyRate
+  cart {
+    lines {
+      id
+      quantity
+      # Set by the storefront bundle block on every line of a bundle it adds.
+      bundleId: attribute(key: "_kas_bundle") {
+        value
+      }
+      # Unit price, for the exact fixed bundle price.
+      cost {
+        amountPerQuantity {
+          amount
+        }
+      }
+      # Shopify rejects merges of lines on a selling plan; such lines are left alone.
+      sellingPlanAllocation {
+        sellingPlan {
+          id
+        }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          # Bundles match by product: the shopper may pick any variant.
+          product {
+            id
+          }
+        }
+      }
+    }
+  }
+  cartTransform {
+    # Written by the app (app/lib/bundles.server.ts, syncBundleMergeConfig)
+    # whenever a one-time bundle is saved, switched on or off, or deleted.
+    metafield(namespace: "$app", key: "bundle-merge") {
+      jsonValue
+    }
+  }
+}

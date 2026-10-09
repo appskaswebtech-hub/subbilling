@@ -21,6 +21,7 @@ import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { IconCell, CellIcon, IconCalendar, rowColorFor } from "../components/TableIcons";
 import { calcMrr } from "../utils/mrr";
+import { BRAND_GRADIENT, SOFT_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 const PAGE_SIZE = 20;
@@ -581,7 +582,7 @@ export default function Customers() {
               style={{
                 fontSize: "13px", padding: "8px 16px",
                 border: "none", borderRadius: "9px",
-                background: T.purpleDark, color: "#fff",
+                background: BRAND_GRADIENT, color: "#fff",
                 cursor: "pointer", fontWeight: 500,
               }}
             >
@@ -841,7 +842,7 @@ export default function Customers() {
                               }}
                               style={{
                                 flex: 1, padding: "7px", borderRadius: "8px", border: "none",
-                                background: T.purpleDark, color: "#fff",
+                                background: BRAND_GRADIENT, color: "#fff",
                                 fontSize: "12px", fontWeight: 600, cursor: "pointer",
                               }}
                             >
@@ -899,9 +900,9 @@ export default function Customers() {
                 style={{
                   fontSize:     "12px",
                   padding:      "7px 14px",
-                  border:       `0.5px solid #AFA9EC`,
+                  border:       "none",
                   borderRadius: "20px",
-                  background:   T.purpleBg,
+                  background:   SOFT_GRADIENT,
                   color:        T.purpleFg,
                   cursor:       "pointer",
                   whiteSpace:   "nowrap",

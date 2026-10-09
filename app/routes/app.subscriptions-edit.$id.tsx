@@ -26,6 +26,7 @@ import { chargeInFlight } from "../lib/prepaid-hold.server";
 import { formatMoney } from "../config/currency";
 import { CommissionCell } from "../components/CommissionCell";
 import { splitCommissions } from "../lib/commission-display";
+import { BRAND_GRADIENT, btnDanger } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // Everything imported from a .server module above is referenced ONLY inside
@@ -560,8 +561,8 @@ export default function SubscriptionDetail() {
                 onClick={() => doAction("resume")}
                 disabled={isSubmitting}
                 style={{
-                  background:   T.purpleDark,
-                  color:        T.purpleBg,
+                  background:   BRAND_GRADIENT,
+                  color:        "#fff",
                   border:       "none",
                   padding:      "9px 18px",
                   borderRadius: "10px",
@@ -601,11 +602,8 @@ export default function SubscriptionDetail() {
                 }}
                 disabled={isSubmitting}
                 style={{
-                  background:   "var(--p-color-bg-surface)",
-                  color:        T.redFg,
-                  border:       `0.5px solid ${T.redBorder}`,
+                  ...btnDanger,
                   padding:      "9px 16px",
-                  borderRadius: "10px",
                   fontSize:     "13px",
                   cursor:       "pointer",
                   opacity:      isSubmitting && activeIntent === "cancel" ? 0.7 : 1,

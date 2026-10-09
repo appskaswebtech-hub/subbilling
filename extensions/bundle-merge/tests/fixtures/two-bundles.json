@@ -1,0 +1,201 @@
+{
+  "payload": {
+    "export": "cart-transform-run",
+    "target": "cart.transform.run",
+    "input": {
+      "presentmentCurrencyRate": "1.0",
+      "cart": {
+        "lines": [
+          {
+            "id": "gid://shopify/CartLine/1",
+            "quantity": 1,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "40.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/11",
+              "product": {
+                "id": "gid://shopify/Product/1"
+              }
+            }
+          },
+          {
+            "id": "gid://shopify/CartLine/2",
+            "quantity": 2,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "30.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/22",
+              "product": {
+                "id": "gid://shopify/Product/2"
+              }
+            }
+          },
+          {
+            "id": "gid://shopify/CartLine/3",
+            "quantity": 1,
+            "bundleId": {
+              "value": "bundle-b"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "20.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/33",
+              "product": {
+                "id": "gid://shopify/Product/3"
+              }
+            }
+          },
+          {
+            "id": "gid://shopify/CartLine/4",
+            "quantity": 1,
+            "bundleId": {
+              "value": "bundle-b"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "20.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/44",
+              "product": {
+                "id": "gid://shopify/Product/4"
+              }
+            }
+          }
+        ]
+      },
+      "cartTransform": {
+        "metafield": {
+          "jsonValue": {
+            "bundles": [
+              {
+                "id": "bundle-a",
+                "title": "Starter kit",
+                "parentVariantId": "gid://shopify/ProductVariant/900",
+                "percent": 10,
+                "kind": "SET",
+                "pricingMode": "PERCENT",
+                "fixedPrice": null,
+                "minItems": 0,
+                "tiers": [],
+                "lines": [
+                  {
+                    "productId": "gid://shopify/Product/1",
+                    "quantity": 1
+                  },
+                  {
+                    "productId": "gid://shopify/Product/2",
+                    "quantity": 2
+                  }
+                ]
+              },
+              {
+                "id": "bundle-b",
+                "title": "Wax kit",
+                "parentVariantId": "gid://shopify/ProductVariant/901",
+                "percent": 25,
+                "kind": "SET",
+                "pricingMode": "PERCENT",
+                "fixedPrice": null,
+                "minItems": 0,
+                "tiers": [],
+                "lines": [
+                  {
+                    "productId": "gid://shopify/Product/3",
+                    "quantity": 1
+                  },
+                  {
+                    "productId": "gid://shopify/Product/4",
+                    "quantity": 1
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "output": {
+      "operations": [
+        {
+          "linesMerge": {
+            "cartLines": [
+              {
+                "cartLineId": "gid://shopify/CartLine/1",
+                "quantity": 1
+              },
+              {
+                "cartLineId": "gid://shopify/CartLine/2",
+                "quantity": 2
+              }
+            ],
+            "parentVariantId": "gid://shopify/ProductVariant/900",
+            "title": "Starter kit",
+            "price": {
+              "percentageDecrease": {
+                "value": "10"
+              }
+            },
+            "attributes": [
+              {
+                "key": "_kas_bundle_id",
+                "value": "bundle-a"
+              }
+            ]
+          }
+        },
+        {
+          "linesMerge": {
+            "cartLines": [
+              {
+                "cartLineId": "gid://shopify/CartLine/3",
+                "quantity": 1
+              },
+              {
+                "cartLineId": "gid://shopify/CartLine/4",
+                "quantity": 1
+              }
+            ],
+            "parentVariantId": "gid://shopify/ProductVariant/901",
+            "title": "Wax kit",
+            "price": {
+              "percentageDecrease": {
+                "value": "25"
+              }
+            },
+            "attributes": [
+              {
+                "key": "_kas_bundle_id",
+                "value": "bundle-b"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

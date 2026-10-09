@@ -1,0 +1,113 @@
+{
+  "payload": {
+    "export": "cart-transform-run",
+    "target": "cart.transform.run",
+    "input": {
+      "presentmentCurrencyRate": "1.0",
+      "cart": {
+        "lines": [
+          {
+            "id": "gid://shopify/CartLine/1",
+            "quantity": 2,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "40.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/11",
+              "product": {
+                "id": "gid://shopify/Product/1"
+              }
+            }
+          },
+          {
+            "id": "gid://shopify/CartLine/2",
+            "quantity": 2,
+            "bundleId": {
+              "value": "bundle-a"
+            },
+            "cost": {
+              "amountPerQuantity": {
+                "amount": "30.0"
+              }
+            },
+            "sellingPlanAllocation": null,
+            "merchandise": {
+              "__typename": "ProductVariant",
+              "id": "gid://shopify/ProductVariant/22",
+              "product": {
+                "id": "gid://shopify/Product/2"
+              }
+            }
+          }
+        ]
+      },
+      "cartTransform": {
+        "metafield": {
+          "jsonValue": {
+            "bundles": [
+              {
+                "id": "bundle-a",
+                "title": "Starter kit",
+                "parentVariantId": "gid://shopify/ProductVariant/900",
+                "percent": 20,
+                "kind": "SET",
+                "pricingMode": "FIXED_PRICE",
+                "fixedPrice": 80,
+                "minItems": 0,
+                "tiers": [],
+                "lines": [
+                  {
+                    "productId": "gid://shopify/Product/1",
+                    "quantity": 1
+                  },
+                  {
+                    "productId": "gid://shopify/Product/2",
+                    "quantity": 2
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "output": {
+      "operations": [
+        {
+          "linesMerge": {
+            "cartLines": [
+              {
+                "cartLineId": "gid://shopify/CartLine/1",
+                "quantity": 2
+              },
+              {
+                "cartLineId": "gid://shopify/CartLine/2",
+                "quantity": 2
+              }
+            ],
+            "parentVariantId": "gid://shopify/ProductVariant/900",
+            "title": "Starter kit",
+            "price": {
+              "percentageDecrease": {
+                "value": "20"
+              }
+            },
+            "attributes": [
+              {
+                "key": "_kas_bundle_id",
+                "value": "bundle-a"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

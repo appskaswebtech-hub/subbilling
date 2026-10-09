@@ -19,6 +19,7 @@ import { IconCell, CellIcon, IconCalendar, IconBox, rowColorFor } from "../compo
 import { CommissionCell } from "../components/CommissionCell";
 import { splitCommissions } from "../lib/commission-display";
 import { formatMoney } from "../config/currency";
+import { SOFT_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 // ─── Design tokens ───────────────────────────────────────────
 const T = {
@@ -402,8 +403,8 @@ export default function CustomerDetail() {
               onClick={() => window.open(shopifyAdminCustomerUrl, "_blank")}
               style={{
                 fontSize: "13px", padding: "9px 16px",
-                border: `0.5px solid #AFA9EC`,
-                borderRadius: "10px", background: T.purpleBg,
+                border: "none",
+                borderRadius: "10px", background: SOFT_GRADIENT,
                 color: T.purpleFg, cursor: "pointer", fontWeight: 500,
               }}
             >

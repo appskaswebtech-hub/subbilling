@@ -9,6 +9,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 const T = {
@@ -154,7 +155,7 @@ export default function LoyaltyDiscountPage() {
             disabled={isSaving || !hasAccess}
             style={{
               fontSize: "13px", padding: "8px 18px", borderRadius: "9px",
-              background: savedBanner ? T.greenFg : T.purpleDark,
+              background: savedBanner ? T.greenFg : BRAND_GRADIENT,
               color: "#fff", border: "none",
               cursor: isSaving || !hasAccess ? "not-allowed" : "pointer",
               fontWeight: 500, marginTop: "4px",
@@ -224,7 +225,7 @@ export default function LoyaltyDiscountPage() {
                   onClick={() => hasAccess && setEnabled(!enabled)}
                   style={{
                     width: "44px", height: "26px", borderRadius: "13px",
-                    background: enabled ? T.purpleDark : "#d1d5db",
+                    background: enabled ? BRAND_GRADIENT : "#d1d5db",
                     position: "relative", cursor: hasAccess ? "pointer" : "not-allowed",
                     transition: "background 0.2s", flexShrink: 0,
                   }}

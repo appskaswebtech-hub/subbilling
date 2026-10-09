@@ -1,0 +1,4 @@
+{
+  "name": "Bundle items",
+  "description": "Shows each item of a recurring bundle, with its image, under the bundle's line in checkout, on the Thank you page and on the Order status page."
+}

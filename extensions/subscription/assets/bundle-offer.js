@@ -28,6 +28,14 @@
  * (extensions/bundle-discount) charges the same: % off, a fixed price for the
  * full set, or tiers by the number of units. Recurring tiered bundles add every
  * line on the reached tier's own selling plan.
+ *
+ * A recurring bundle with `product` is sold as that one Shopify product (the
+ * app creates it; Shopify won't merge subscription lines into one). Its items
+ * are shown but fixed: no ticks or size choice. The price shown is the
+ * product's own price on the bundle's selling plan, exactly what's charged,
+ * and the cart gets ONE line with an "Includes" property listing the items.
+ * Recurring bundles without `product` (saved before it existed) still add one
+ * line per item.
  */
 (function () {
   'use strict';
@@ -237,6 +245,69 @@
     }));
   }
 
+  /**
+   * A bundle sold as its own product: that variant, and what it costs on the
+   * bundle's selling plan, from /products/<handle>.js. Null when the bundle
+   * isn't sold as a product; false when the product can't be loaded, which
+   * makes the bundle unavailable (its items can't be sold on their own lines).
+   */
+  function resolveOffer(root, bundle) {
+    if (!bundle.product) return Promise.resolve(null);
+    return loadProduct(root, bundle.product.handle).then(function (product) {
+      var variant = (product.variants || []).filter(function (v) {
+        return String(v.id) === String(bundle.product.variantId);
+      })[0];
+      if (!variant) throw new Error('its variant ' + bundle.product.variantId + ' no longer exists');
+      var allocation = (variant.selling_plan_allocations || []).filter(function (a) {
+        return String(a.selling_plan_id) === String(bundle.sellingPlanId);
+      })[0];
+      if (!allocation) throw new Error('its subscription plan is not on the product');
+      return {
+        variantId: variant.id,
+        // The product's price, and its price on the plan: the bundle discount
+        // or the exact fixed price.
+        was:       variant.price,
+        price:     allocation.price,
+        available: variant.available,
+      };
+    }).catch(function (err) {
+      console.warn('[KAS bundles] "' + bundle.name + '": can\'t load its product "' + bundle.product.handle + '": ' +
+        ((err && err.message) || err) + '. The bundle shows as unavailable. Open it in the app and save it again.');
+      return false;
+    });
+  }
+
+  function itemLabel(item) {
+    return item.title + (isDefaultTitle(item.selected.title) ? '' : ' – ' + item.selected.title);
+  }
+
+  /** "2 × Snowboard – Large, Bindings": the cart line's "Includes" property. */
+  function includesText(items) {
+    return items.map(function (item) {
+      return (item.quantity > 1 ? item.quantity + ' × ' : '') + itemLabel(item);
+    }).join(', ');
+  }
+
+  /**
+   * The cart line's hidden `_kas_items` property: each item's product title
+   * (t), variant (v, '' for a product without options), quantity (q) and a
+   * small image (i). The app's checkout extension
+   * (extensions/bundle-checkout-items), cart app embed (bundle-cart.js) and
+   * subscription page list the items from it under the bundle line.
+   */
+  function checkoutItems(items) {
+    return JSON.stringify(items.map(function (item) {
+      var src = imageFor(item.product, item.selected);
+      if (src) src = src.replace(/^http:\/\//, 'https://') + (src.indexOf('?') === -1 ? '?' : '&') + 'width=120';
+      return {
+        t: item.title,
+        v: isDefaultTitle(item.selected.title) ? '' : item.selected.title,
+        q: item.quantity,
+        i: src || '',
+      };
+    }));
+  }
+
   // ── Shared building blocks ───────────────────────────────────
   function itemImage(item, className) {
     var img = el('img', 'kas-bundle__img' + (className ? ' ' + className : ''));
@@ -283,6 +354,9 @@
    * the savings card's round check.
    */
   function itemToggle(item, onChange, circle) {
+    // A bundle sold as one product has fixed contents: nothing to untick. The
+    // savings card keeps its round check, as a plain mark.
+    if (item.locked) return circle ? el('span', 'kas-bundle__check', '✓') : document.createTextNode('');
     var input = el('input', 'kas-bundle__toggle' + (circle ? ' kas-bundle__toggle--circle' : ''));
     input.type = 'checkbox';
     input.checked = item.included;
@@ -298,9 +372,10 @@
   /**
    * Everything that changes when a variant, a tick or a box count changes.
    * Prices and totals count only the ticked (or picked) items;
-   * `labelFor({ ticked, all, units })` gives the button text.
+   * `labelFor({ ticked, all, units })` gives the button text. With `offer`
+   * (the bundle sold as its own product) the totals are that product's.
    */
-  function makeTotals(container, bundle, items, labelFor) {
+  function makeTotals(container, bundle, items, labelFor, offer) {
     var format = container.dataset.moneyFormat;
     var nodes = {
       was:  el('span', 'kas-bundle__was'),
@@ -350,7 +425,13 @@
       var short = box ? Math.max(0, min - units) : 0;
       var allTicked = ticked === items.length;
 
-      var discounted = discountedTotal(bundle, total, units, !box && allTicked);
+      // Sold as its own product: that product's price, and its price on the
+      // bundle's plan, are exactly what the cart will charge.
+      if (offer) {
+        total = offer.was;
+        if (!offer.available) sellable = false;
+      }
+      var discounted = offer ? offer.price : discountedTotal(bundle, total, units, !box && allTicked);
       var saving = total - discounted;
       nodes.was.textContent  = discounted < total ? formatMoney(total, format) : '';
       nodes.was.hidden       = !(discounted < total);
@@ -546,9 +627,10 @@
     card.appendChild(bar);
     card.appendChild(ctx.totals.nodes.pricing);
 
-    // Ticks and options tucked away so the bar stays one line until wanted.
+    // Ticks and options tucked away so the bar stays one line until wanted. A
+    // bundle sold as one product has neither: it just lists what's in it.
     var details = el('details', 'kas-bundle__options');
-    details.appendChild(el('summary', null, 'Customize bundle'));
+    details.appendChild(el('summary', null, ctx.locked ? "What's included" : 'Customize bundle'));
     ctx.items.forEach(function (item) {
       var row = el('div', 'kas-bundle__item');
       row.appendChild(itemToggle(item, ctx.changed));
@@ -658,17 +740,31 @@
     savings:  renderSavings,
   };
 
-  function renderBundle(container, bundle, resolved) {
+  /**
+   * `offer`: the bundle's own product (see resolveOffer), null when it has
+   * none, false when that product can't be loaded.
+   */
+  function renderBundle(container, bundle, resolved, offer) {
     var box = isBox(bundle);
     var items = resolved.filter(Boolean);
     // An item that can't be sold makes a set unsellable; say so rather than
     // silently adding a partial set. A box just offers what's left of its pool.
-    var complete = items.length > 0 && (box || items.length === resolved.length);
+    var complete = offer !== false && items.length > 0 && (box || items.length === resolved.length);
     if (!complete) {
       var card = el('div', 'kas-bundle kas-bundle--classic');
       card.appendChild(el('p', 'kas-bundle__title', bundle.name));
       card.appendChild(el('p', 'kas-bundle__meta', 'This bundle is currently unavailable.'));
       return card;
+    }
+
+    // Sold as one product: its contents are fixed, exactly as the app set them.
+    var locked = !!offer;
+    if (locked) {
+      items.forEach(function (item) {
+        item.locked   = true;
+        item.included = true;
+        item.choice   = false;
+      });
     }
 
     var design = DESIGNS.indexOf(bundle.design) !== -1 ? bundle.design : 'classic';
@@ -684,11 +780,12 @@
     var button = makeButton(container, labelFor({ ticked: items.length, all: items.length, units: 0 }));
     var error = el('p', 'kas-bundle__error');
     error.hidden = true;
-    var totals = makeTotals(container, bundle, items, labelFor);
+    var totals = makeTotals(container, bundle, items, labelFor, offer || null);
 
     var ctx = {
       bundle:  bundle,
       items:   items,
+      locked:  locked,
       format:  container.dataset.moneyFormat,
       meta:    metaText(bundle),
       totals:  totals,
@@ -702,13 +799,13 @@
     liveBundles.push({ button: button, refresh: ctx.changed });
 
     button.addEventListener('click', function () {
-      addBundle(container, bundle, items, button, error, ctx.changed);
+      addBundle(container, bundle, items, button, error, ctx.changed, offer || null);
     });
     return node;
   }
 
   // ── Add to cart ──────────────────────────────────────────────
-  function addBundle(container, bundle, items, button, error, refresh) {
+  function addBundle(container, bundle, items, button, error, refresh, offer) {
     button.disabled = true;
     button.dataset.busy = '1';
     button.textContent = 'Adding…';
@@ -731,14 +828,28 @@
 
     // Recurring tiered bundles: every line on the reached tier's plan.
     var plan = sellingPlanFor(bundle, units);
-    var payload = {
-      items: chosen.map(function (item) {
-        var line = { id: Number(item.selected.id), quantity: item.quantity, properties: {} };
-        line.properties[BUNDLE_PROPERTY] = bundle.id;
-        if (plan) line.selling_plan = Number(plan);
-        return line;
-      }),
-    };
+    var payload;
+    if (offer) {
+      // Sold as its own product: ONE line, which the cart, checkout, the
+      // subscription and its orders all show as the bundle. "Includes" (no
+      // underscore, so it's visible) tells the customer and whoever packs the
+      // order what's in it.
+      var line = { id: Number(offer.variantId), quantity: 1, selling_plan: Number(bundle.sellingPlanId), properties: {} };
+      line.properties[BUNDLE_PROPERTY] = bundle.id;
+      line.properties.Includes = includesText(chosen);
+      // Hidden: the checkout extension draws the items from it.
+      line.properties._kas_items = checkoutItems(chosen);
+      payload = { items: [line] };
+    } else {
+      payload = {
+        items: chosen.map(function (item) {
+          var line = { id: Number(item.selected.id), quantity: item.quantity, properties: {} };
+          line.properties[BUNDLE_PROPERTY] = bundle.id;
+          if (plan) line.selling_plan = Number(plan);
+          return line;
+        }),
+      };
+    }
 
     // Never leave the button on "Adding…": a request that hasn't answered in
     // 15 s is abandoned (where the browser supports that) and says so.
@@ -880,8 +991,11 @@
         if (!bundles.length) return;
 
         return Promise.all(bundles.map(function (b) {
-          return resolveItems(container.dataset.root, b).then(function (items) {
-            return { bundle: b, items: items };
+          return Promise.all([
+            resolveItems(container.dataset.root, b),
+            resolveOffer(container.dataset.root, b),
+          ]).then(function (loaded) {
+            return { bundle: b, items: loaded[0], offer: loaded[1] };
           });
         })).then(function (resolved) {
           if (container.dataset.heading) {
@@ -889,7 +1003,7 @@
           }
           resolved.forEach(function (r) {
             try {
-              container.appendChild(renderBundle(container, r.bundle, r.items));
+              container.appendChild(renderBundle(container, r.bundle, r.items, r.offer));
             } catch (err) {
               // One broken bundle must not take the others (or the page) down.
               console.warn('[KAS bundles] could not render bundle ' + r.bundle.id + ':', err);

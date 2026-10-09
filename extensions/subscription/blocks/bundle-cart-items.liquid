@@ -1,0 +1,66 @@
+{%- comment -%}
+  App embed: a "Show N items" dropdown under each recurring bundle line on the
+  cart page and in the cart drawer, listing the bundle's items with images,
+  like Shopify's own bundle lines.
+
+  A recurring bundle is one subscription line (its own product), and Shopify
+  can't group items under a line that has a selling plan, so the theme's cart
+  shows only the line, its image and its "Includes" text. The bundle block
+  writes the items into the line's hidden `_kas_items` property; bundle-cart.js
+  reads them from /cart.js and adds the dropdown. Checkout gets the same
+  dropdown from the app's checkout extension (extensions/bundle-checkout-items).
+
+  The theme draws the cart, so this looks for Dawn-style cart rows, with a
+  fallback for other themes. Merchants switch it on under Theme settings → App
+  embeds.
+{%- endcomment -%}
+
+<div
+  id="kas-bundle-cart"
+  data-root="{{ routes.root_url }}"
+  data-hide-includes="{{ block.settings.hide_includes }}"
+  hidden
+></div>
+
+<style>
+  .kas-cart-bundle { margin-top: 6px; font-size: 13px; line-height: 1.35; }
+  .kas-cart-bundle > summary {
+    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    list-style: none; opacity: .8; user-select: none;
+  }
+  .kas-cart-bundle > summary:hover { opacity: 1; }
+  .kas-cart-bundle > summary::-webkit-details-marker { display: none; }
+  /* A chevron that points down when closed and up when open. */
+  .kas-cart-bundle > summary::after {
+    content: ""; width: 6px; height: 6px; margin-top: -3px;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg); transition: transform .15s ease, margin .15s ease;
+  }
+  .kas-cart-bundle[open] > summary::after { transform: rotate(-135deg); margin-top: 3px; }
+  .kas-cart-bundle__list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
+  .kas-cart-bundle__item { display: flex; align-items: center; gap: 10px; }
+  .kas-cart-bundle__img {
+    width: 40px; height: 40px; flex-shrink: 0; object-fit: cover;
+    border-radius: 6px; border: 1px solid rgba(0,0,0,.08); background: rgba(0,0,0,.04);
+  }
+  .kas-cart-bundle__text { display: flex; flex-direction: column; min-width: 0; }
+  .kas-cart-bundle__variant { font-size: 12px; opacity: .65; }
+  .kas-cart-bundle__hidden { display: none !important; }
+</style>
+
+<script src="{{ 'bundle-cart.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Bundle items in cart",
+  "target": "body",
+  "settings": [
+    {
+      "type": "checkbox",
+      "id": "hide_includes",
+      "label": "Replace the \"Includes\" text with the dropdown",
+      "default": true
+    }
+  ]
+}
+{% endschema %}

@@ -10,6 +10,7 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import crypto from "crypto";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT, SOFT_GRADIENT, btnDanger } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Design tokens ───────────────────────────────────────────
@@ -258,8 +259,8 @@ export default function ApiKeyPage() {
             onClick={() => setShowDocs(true)}
             style={{
               ...btn, marginTop: "4px",
-              border: `0.5px solid ${T.purple}`,
-              background: T.purpleBg, color: T.purpleFg,
+              border: "none",
+              background: SOFT_GRADIENT, color: T.purpleFg,
             }}
           >
             📖 API Documentation
@@ -338,7 +339,7 @@ export default function ApiKeyPage() {
                       />
                       <button
                         onClick={() => copyToClipboard(generatedKey)}
-                        style={{ ...btn, background: T.purpleDark, color: "#fff", border: "none" }}
+                        style={{ ...btn, background: BRAND_GRADIENT, color: "#fff", border: "none" }}
                       >
                         {copied ? "✓ Copied" : "Copy Key"}
                       </button>
@@ -370,14 +371,14 @@ export default function ApiKeyPage() {
                 <button
                   onClick={handleGenerate}
                   disabled={isLoading}
-                  style={{ ...btn, background: T.purpleDark, color: "#fff", border: "none" }}
+                  style={{ ...btn, background: BRAND_GRADIENT, color: "#fff", border: "none" }}
                 >
                   🪄 {isLoading ? "Generating…" : hasKey ? "Regenerate Key" : "Generate API Key"}
                 </button>
                 {hasKey && isActive && !generatedKey && (
                   <button
                     onClick={() => setShowRevoke(true)}
-                    style={{ ...btn, background: T.redBg, color: T.redFg, border: "0.5px solid #F09595" }}
+                    style={{ ...btn, ...btnDanger }}
                   >
                     Revoke Key
                   </button>

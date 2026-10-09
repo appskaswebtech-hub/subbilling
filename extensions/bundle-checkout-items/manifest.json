@@ -1,0 +1,5 @@
+{
+  "purchase.checkout.cart-line-item.render-after": {},
+  "purchase.thank-you.cart-line-item.render-after": {},
+  "customer-account.order-status.cart-line-item.render-after": {}
+}

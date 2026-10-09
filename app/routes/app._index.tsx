@@ -18,6 +18,7 @@ import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1237,7 +1238,7 @@ function ContractsTable({ contracts }: { contracts: ShapedContract[] }) {
                           border: "1px solid var(--p-color-border)",
                           background:
                             p === page
-                              ? "#26215C"
+                              ? BRAND_GRADIENT
                               : "var(--p-color-bg-surface)",
                           color:
                             p === page

@@ -140,19 +140,29 @@ export async function action({ request }: ActionFunctionArgs) {
       include: { items: true },
     });
     if (!bundle?.shopifySellingPlanId) return json({ ok: false, error: "Choose a prepaid bundle." });
-    wanted        = collapseBundleItems(bundle.items).map((i) => ({ variantId: i.variantId, quantity: i.quantity }));
 
-    // A tiered bundle uses the tier its full quantity reaches, and that tier's
-    // own selling plan; other pricing uses the bundle percentage (for a fixed
-    // price, its matching percentage) on the base plan.
-    const tiers   = bundle.pricingMode === "TIERED" ? parseTiers(bundle.tiersJson) : [];
-    const units   = wanted.reduce((s, w) => s + w.quantity, 0);
-    const reached = [...tiers].reverse().find((t) => units >= t.minItems) ?? null;
-    const percent = bundle.pricingMode === "TIERED" ? tierPercent(tiers, units) : bundle.discountPercent;
-    adjust        = (p) => p * (1 - percent / 100);
+    if (bundle.bundleVariantId) {
+      // Sold as its own product: one line, priced like its selling plan does
+      // (a fixed price exactly, otherwise % off the product's price).
+      const fixedPrice = bundle.pricingMode === "FIXED_PRICE" && bundle.fixedPrice ? bundle.fixedPrice : null;
+      wanted        = [{ variantId: bundle.bundleVariantId, quantity: 1 }];
+      adjust        = fixedPrice !== null ? () => fixedPrice : (p) => p * (1 - bundle.discountPercent / 100);
+      sellingPlanId = bundle.shopifySellingPlanId;
+    } else {
+      // Saved before bundles had their own product: one line per item. A
+      // tiered bundle uses the tier its full quantity reaches, and that tier's
+      // own selling plan; other pricing uses the bundle percentage (for a fixed
+      // price, its matching percentage) on the base plan.
+      wanted        = collapseBundleItems(bundle.items).map((i) => ({ variantId: i.variantId, quantity: i.quantity }));
+      const tiers   = bundle.pricingMode === "TIERED" ? parseTiers(bundle.tiersJson) : [];
+      const units   = wanted.reduce((s, w) => s + w.quantity, 0);
+      const reached = [...tiers].reverse().find((t) => units >= t.minItems) ?? null;
+      const percent = bundle.pricingMode === "TIERED" ? tierPercent(tiers, units) : bundle.discountPercent;
+      adjust        = (p) => p * (1 - percent / 100);
+      sellingPlanId = reached?.sellingPlanId ?? bundle.shopifySellingPlanId;
+    }
     interval      = bundle.interval;
     intervalCount = bundle.intervalCount;
-    sellingPlanId = reached?.sellingPlanId ?? bundle.shopifySellingPlanId;
     bundleId      = bundle.id;
     label         = bundle.name;
   } else {

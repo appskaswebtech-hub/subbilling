@@ -10,6 +10,7 @@
 
 import { useMemo, useState } from "react";
 import { Text } from "@shopify/polaris";
+import { BRAND_GRADIENT } from "../config/theme";
 
 export interface EditableLine {
   id:                   string;
@@ -263,7 +264,7 @@ export default function SubscriptionEditForm({
           onClick={() => onSubmit(build("update-contract"))}
           style={{
             padding: "8px 16px", borderRadius: "8px", fontSize: "13px", fontWeight: 600,
-            border: "none", background: "#26215C", color: "#fff",
+            border: "none", background: BRAND_GRADIENT, color: "#fff",
             cursor: locked || !dirty ? "not-allowed" : "pointer",
             opacity: locked || !dirty ? 0.55 : 1,
           }}

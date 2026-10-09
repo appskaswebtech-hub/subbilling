@@ -3,13 +3,24 @@
 // Product bundles: a fixed set of products the merchant sells together at a
 // discount. Two kinds, priced by two different Shopify mechanisms:
 //
-//   RECURRING  Every line goes in the cart on the bundle's OWN selling plan, so
-//              Shopify puts them on one contract that renews together. The plan
-//              lives in a selling plan group created for this bundle alone, and
-//              its pricing policy IS the bundle discount, so every renewal keeps
-//              it with no extra work. The group carries appId "kas-bundle" so
-//              the storefront subscription widget can hide it from the normal
-//              plan picker (subscription-options.liquid).
+//   RECURRING  Sold as ONE Shopify product the app creates for the bundle
+//              (syncBundleProduct): status UNLISTED so it stays out of the
+//              catalog, subscription-only, priced at the bundle price, with the
+//              items listed in its description and in an "Includes" line
+//              property. Cart, checkout, the subscription and every renewal
+//              order show one line. (Shopify's cart transform could merge item
+//              lines into one, but it rejects lines that have a selling plan.)
+//              So a recurring bundle is a fixed set of fixed variants, priced
+//              at % off or an exact fixed price: no ticks, boxes or tiers.
+//
+//              The product is on the bundle's OWN selling plan, in a selling
+//              plan group created for this bundle alone, whose pricing policy
+//              IS the bundle discount, so every renewal keeps it. The group
+//              carries appId "kas-bundle" so the storefront subscription widget
+//              hides it from the normal plan picker (subscription-options.liquid).
+//              Bundles saved before the product existed have none yet: their
+//              plan stays on the items and the block adds one line per item,
+//              until the merchant saves them again.
 //
 //   ONE_TIME   Plain lines, no selling plan. Discounted at checkout by the
 //              bundle-discount function (extensions/bundle-discount), which
@@ -25,6 +36,7 @@
 // (getStorefrontBundles requires a recurring bundle's plan to exist), and the
 // merchant is told what to fix.
 
+import { createHash } from "node:crypto";
 import db from "../db.server";
 import { formatUserErrors, type AdminGraphQL, type UserError } from "./subscription-contract.server";
 import {
@@ -115,6 +127,171 @@ const PLAN_GROUP_DELETE = `#graphql
 const VARIANT_PRICES = `#graphql
   query BundleVariantPrices($ids: [ID!]!) {
     nodes(ids: $ids) { ... on ProductVariant { id price } }
+  }
+`;
+
+// ── The product a recurring bundle is sold as ──
+
+const BUNDLE_ITEM_DETAILS = `#graphql
+  query BundleItemDetails($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id
+        price
+        title
+        image { url }
+        product { title featuredMedia { preview { image { url } } } }
+      }
+    }
+  }
+`;
+
+const BUNDLE_PRODUCT_LOOKUP = `#graphql
+  query BundleProductLookup($id: ID!) {
+    product(id: $id) { id handle variants(first: 1) { nodes { id } } }
+  }
+`;
+
+const BUNDLE_PRODUCT_CREATE = `#graphql
+  mutation BundleProductCreate($product: ProductCreateInput!) {
+    productCreate(product: $product) {
+      product { id handle variants(first: 1) { nodes { id } } }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BUNDLE_PRODUCT_UPDATE = `#graphql
+  mutation BundleProductUpdate($product: ProductUpdateInput!) {
+    productUpdate(product: $product) {
+      product { id handle }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BUNDLE_VARIANT_UPDATE = `#graphql
+  mutation BundleVariantUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+// `name` is deprecated in favour of the catalog's title, but sales-channel
+// publications (Online Store, Point of Sale, Shop) have no catalog, so the
+// name is the only thing that says which one is the Online Store.
+const PUBLICATIONS = `#graphql
+  query BundlePublications {
+    publications(first: 50) { nodes { id name catalog { title } } }
+  }
+`;
+
+const BUNDLE_PRODUCT_PUBLISH = `#graphql
+  mutation BundleProductPublish($id: ID!, $input: [PublicationInput!]!) {
+    publishablePublish(id: $id, input: $input) {
+      userErrors { field message }
+    }
+  }
+`;
+
+// ── The bundle product's images (syncBundleImages) ──
+
+// `collage`: what the app kept there before, when it drew a picture of the
+// items; only read to tidy it away.
+const BUNDLE_PRODUCT_MEDIA = `#graphql
+  query BundleProductMedia($id: ID!) {
+    product(id: $id) {
+      media(first: 50) { nodes { id } }
+      images: metafield(namespace: "kas_bundle", key: "images") { jsonValue }
+      collage: metafield(namespace: "kas_bundle", key: "collage") { id }
+    }
+  }
+`;
+
+const BUNDLE_MEDIA_ATTACH = `#graphql
+  mutation BundleMediaAttach($product: ProductUpdateInput!, $media: [CreateMediaInput!]) {
+    productUpdate(product: $product, media: $media) {
+      product { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BUNDLE_MEDIA_REORDER = `#graphql
+  mutation BundleMediaReorder($id: ID!, $moves: [MoveInput!]!) {
+    productReorderMedia(id: $id, moves: $moves) {
+      mediaUserErrors { field message }
+    }
+  }
+`;
+
+const BUNDLE_MEDIA_DELETE = `#graphql
+  mutation BundleMediaDelete($ids: [ID!]!) {
+    fileDelete(fileIds: $ids) {
+      deletedFileIds
+      userErrors { field message }
+    }
+  }
+`;
+
+const PRODUCT_METAFIELDS_DELETE = `#graphql
+  mutation BundleProductMetafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+    metafieldsDelete(metafields: $metafields) {
+      deletedMetafields { key }
+      userErrors { field message }
+    }
+  }
+`;
+
+const PRODUCT_METAFIELDS_SET = `#graphql
+  mutation BundleProductMetafields($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BUNDLES_ELIGIBILITY = `#graphql
+  query BundlesEligibility {
+    shop { features { bundles { eligibleForBundles ineligibilityReason } } }
+  }
+`;
+
+// ── The cart transform that merges one-time bundles (extensions/bundle-merge) ──
+
+const CART_TRANSFORMS = `#graphql
+  query BundleCartTransforms {
+    cartTransforms(first: 5) { nodes { id functionId } }
+  }
+`;
+
+const CART_TRANSFORM_CREATE = `#graphql
+  mutation BundleCartTransformCreate($metafields: [MetafieldInput!]) {
+    cartTransformCreate(functionHandle: "bundle-merge", blockOnFailure: false, metafields: $metafields) {
+      cartTransform { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+const CART_TRANSFORM_CONFIG_SET = `#graphql
+  mutation BundleMergeConfig($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+const BUNDLE_PRODUCT_DELETE = `#graphql
+  mutation BundleProductDelete($input: ProductDeleteInput!) {
+    productDelete(input: $input) {
+      deletedProductId
+      userErrors { field message }
+    }
   }
 `;
 
@@ -324,6 +501,19 @@ export function parseBundleInput(raw: {
   if (kind === "BOX" && pricingMode === "FIXED_PRICE") {
     return { ok: false, error: "A build-your-own box can't have a fixed price. Use % off or tiered pricing." };
   }
+  // A recurring bundle is sold as one product with fixed contents (see the top
+  // of this file), so the shopper can't change what's in it.
+  if (type === "RECURRING") {
+    if (kind === "BOX") {
+      return { ok: false, error: "A build-your-own box can only be a one-time bundle. A recurring bundle is sold as one product with fixed contents." };
+    }
+    if (pricingMode === "TIERED") {
+      return { ok: false, error: "Tiered pricing is for one-time bundles. A recurring bundle is one product with fixed contents: use % off or a fixed price." };
+    }
+    if (items.some((i) => i.variantChoice)) {
+      return { ok: false, error: "Pick one size or colour for each product. A recurring bundle is one product with fixed contents." };
+    }
+  }
 
   let minItems = 0;
   if (kind === "BOX") {
@@ -483,6 +673,7 @@ type BundleRowForStorefront = {
   id: string; name: string; type: string; discountPercent: number; paymentMode: string;
   interval: string; intervalCount: number; shopifySellingPlanId: string | null; design: string;
   kind: string; pricingMode: string; fixedPrice: number | null; minItems: number; tiersJson: string | null;
+  bundleVariantId: string | null; bundleProductHandle: string | null;
   items: Array<{ productId: string; variantId: string; variantChoice: boolean; handle: string; title: string; quantity: number }>;
 };
 
@@ -503,6 +694,12 @@ export function toStorefrontBundle(b: BundleRowForStorefront) {
     sellingPlanId:   b.type === "RECURRING" ? numericId(b.shopifySellingPlanId) : null,
     // Storefront theme; the block falls back to "classic" for anything unknown.
     design:          b.design,
+    // The product a recurring bundle is sold as: the block adds this one
+    // variant (one cart line) instead of the items, and prices it from the
+    // product's own selling plan allocation. Null: one line per item.
+    product: b.type === "RECURRING" && b.bundleVariantId && b.bundleProductHandle
+      ? { handle: b.bundleProductHandle, variantId: numericId(b.bundleVariantId) }
+      : null,
     // Kind and pricing, as app/config/bundle-pricing.ts defines them. For
     // FIXED_PRICE, discountPercent above is the matching percentage.
     kind:            b.kind === "BOX" ? "BOX" : "SET",
@@ -616,13 +813,28 @@ export async function saveBundle(
     bundleId = created.id;
   }
 
-  const bundle = await loadBundle(bundleId);
+  let bundle = await loadBundle(bundleId);
   if (!bundle) return { ok: false, error: "Bundle not found after saving." };
 
   const problems: string[] = [];
 
-  // Recurring bundles need their plan; a bundle switched to one-time must lose
-  // it, or its products keep a plan nothing uses.
+  // Every bundle needs its product: a recurring one is sold as it, a one-time
+  // one is merged into it in the cart (extensions/bundle-merge). Recurring
+  // bundles also need their plan, on that product, so the product first. A
+  // bundle switched to one-time must lose the plan, or its products keep a
+  // plan nothing uses; existing subscribers keep renewing with the product.
+  const productProblem = await syncBundleProduct(graphql, bundle);
+  if (productProblem) {
+    problems.push(bundle.type === "RECURRING"
+      ? `It still adds one cart line per item, because its product couldn't be set up in Shopify: ${productProblem}`
+      : `It shows as separate lines in the cart, because its bundle product couldn't be set up in Shopify: ${productProblem}`);
+  }
+  bundle = (await loadBundle(bundleId)) ?? bundle;
+
+  // Its images: the items', the first item's leading, for every line that shows it.
+  const imagesProblem = await syncBundleImages(graphql, bundle);
+  if (imagesProblem) problems.push(`Its images couldn't be updated: ${imagesProblem}`);
+
   if (bundle.type === "RECURRING") {
     const problem = await syncRecurringBundlePlan(graphql, bundle);
     if (problem) problems.push(`Its subscription plan couldn't be set up in Shopify: ${problem}`);
@@ -633,6 +845,8 @@ export async function saveBundle(
 
   const discountProblem = await syncOneTimeBundleDiscount(graphql, shop);
   if (discountProblem && bundle.type === "ONE_TIME") problems.push(discountProblem);
+  const mergeProblem = await syncBundleMergeConfig(graphql, shop);
+  if (mergeProblem && bundle.type === "ONE_TIME" && !productProblem) problems.push(mergeProblem);
 
   // Last, so the entry carries the selling plan the plan sync just created.
   await syncBundleMetafield(graphql, shop);
@@ -645,10 +859,11 @@ export async function setBundleActive(
 ): Promise<{ ok: boolean; error?: string; warning?: string | null }> {
   const updated = await db.productBundle.updateMany({ where: { id, shop }, data: { active } });
   if (!updated.count) return { ok: false, error: "Bundle not found." };
-  // An inactive one-time bundle must stop being discounted too.
+  // An inactive one-time bundle must stop being discounted and merged too.
   const warning = await syncOneTimeBundleDiscount(graphql, shop);
+  const mergeWarning = await syncBundleMergeConfig(graphql, shop);
   await syncBundleMetafield(graphql, shop);
-  return { ok: true, warning };
+  return { ok: true, warning: warning ?? mergeWarning };
 }
 
 export async function deleteBundle(
@@ -660,11 +875,27 @@ export async function deleteBundle(
   // Existing subscribers keep their contracts: deleting a selling plan group
   // doesn't touch contracts already created from it.
   const planProblem = bundle.shopifyGroupId ? await deleteBundlePlan(graphql, bundle) : null;
+
+  // A recurring bundle's product renews those contracts, so it's only deleted
+  // when nobody subscribes to it any more. Left in place, it can't be
+  // subscribed to again: its plan is gone and it's unlisted. A one-time
+  // bundle's product has no subscribers and simply goes; past orders keep it.
+  let productProblem: string | null = null;
+  if (bundle.bundleProductId) {
+    const subscribers = await db.subscription.count({
+      where: { shop, bundleId: id, status: { in: ["ACTIVE", "PAUSED"] } },
+    });
+    productProblem = subscribers
+      ? `Its product "${bundle.name}" stays in Shopify (unlisted) because ${subscribers} subscription${subscribers === 1 ? " still renews" : "s still renew"} with it. Delete it from Products once they've ended.`
+      : await deleteBundleProduct(graphql, bundle.bundleProductId);
+  }
+
   await db.productBundle.delete({ where: { id } });
   const discountProblem = await syncOneTimeBundleDiscount(graphql, shop);
+  const mergeProblem    = await syncBundleMergeConfig(graphql, shop);
 
   await syncBundleMetafield(graphql, shop, { removedBundleIds: [id] });
-  return { ok: true, warning: planProblem ?? discountProblem };
+  return { ok: true, warning: planProblem ?? productProblem ?? discountProblem ?? mergeProblem };
 }
 
 // ─── Shopify: recurring bundle plan ──────────────────────────────────────────
@@ -676,28 +907,43 @@ export async function deleteBundle(
  * on the plan of the tier the shopper reached. Each plan's option label is
  * unique within the group and is how existing plans are matched on update.
  */
-type DesiredPlan = { key: string; percent: number; tierMinItems: number | null };
+type DesiredPlan = {
+  key: string; percent: number; tierMinItems: number | null;
+  /** A new price instead of % off: a fixed-price bundle sold as its product. */
+  price: number | null;
+};
 
 function desiredPlans(bundle: BundleWithItems): DesiredPlan[] {
   const label = intervalLabel(bundle.interval, bundle.intervalCount);
   const tiers = bundle.pricingMode === "TIERED" ? parseTiers(bundle.tiersJson) : [];
+  // A fixed-price bundle sold as its product is one line: the plan sets that
+  // line's price exactly. Items on their own lines (bundles saved before the
+  // product existed) can't share a total, so they use the matching percentage.
+  const price = bundle.pricingMode === "FIXED_PRICE" && bundle.bundleVariantId && bundle.fixedPrice
+    ? bundle.fixedPrice
+    : null;
   // Below the first tier the base plan applies, which for tiered bundles is no
-  // discount. Fixed-price bundles use their matching percentage.
+  // discount.
   const basePercent = bundle.pricingMode === "TIERED" ? 0 : bundle.discountPercent;
   return [
-    { key: label, percent: basePercent, tierMinItems: null },
-    ...tiers.map((t) => ({ key: `${label} · ${t.minItems}+ items`, percent: t.percent, tierMinItems: t.minItems })),
+    { key: label, percent: basePercent, tierMinItems: null, price },
+    ...tiers.map((t) => ({ key: `${label} · ${t.minItems}+ items`, percent: t.percent, tierMinItems: t.minItems, price: null })),
   ];
 }
 
 function planInput(bundle: BundleWithItems, plan: DesiredPlan) {
+  // Shown in the cart and on the subscription. For a new price, `percent` is
+  // its matching percentage, rounded here as on the storefront badge.
+  const saving = plan.price !== null ? Math.round(plan.percent) : plan.percent;
   return {
-    name:     plan.percent > 0 ? `${plan.key} (${plan.percent}% off)` : plan.key,
+    name:     saving > 0 ? `${plan.key} (${saving}% off)` : plan.key,
     options:  plan.key,
     category: "SUBSCRIPTION",
     billingPolicy:  { recurring: { interval: bundle.interval, intervalCount: bundle.intervalCount } },
     deliveryPolicy: { recurring: { interval: bundle.interval, intervalCount: bundle.intervalCount } },
-    pricingPolicies: plan.percent > 0
+    pricingPolicies: plan.price !== null
+      ? [{ fixed: { adjustmentType: "PRICE", adjustmentValue: { fixedValue: plan.price } } }]
+      : plan.percent > 0
       ? [{ fixed: { adjustmentType: "PERCENTAGE", adjustmentValue: { percentage: plan.percent } } }]
       : [],
     description: bundle.paymentMode === "PREPAID" ? PREPAID_SHOPPER_NOTE : "",
@@ -745,7 +991,12 @@ async function storePlanIds(
 
 /** Returns a problem to show the merchant, or null. */
 async function syncRecurringBundlePlan(graphql: AdminGraphQL, bundle: BundleWithItems): Promise<string | null> {
-  const wanted  = [...new Set(bundle.items.map((i) => i.productId))];
+  // On the product it's sold as, once that's live; bundles still adding one
+  // line per item need it on the items. Switching moves it: the attach step
+  // below removes whatever isn't wanted. Existing subscriptions are unaffected.
+  const wanted  = bundle.bundleVariantId && bundle.bundleProductId
+    ? [bundle.bundleProductId]
+    : [...new Set(bundle.items.map((i) => i.productId))];
   const desired = desiredPlans(bundle);
 
   try {
@@ -868,6 +1119,334 @@ async function deleteBundlePlan(graphql: AdminGraphQL, bundle: { id: string; sho
   return null;
 }
 
+// ─── Shopify: the product a recurring bundle is sold as ──────────────────────
+
+export const BUNDLE_PRODUCT_TAG = "kas-bundle";
+
+/** The most item images the bundle's product gets. */
+const MAX_BUNDLE_IMAGES = 10;
+
+type ItemDetail = {
+  id: string; price: string; title: string; image: { url: string } | null;
+  product: { title: string; featuredMedia: { preview: { image: { url: string } | null } | null } | null };
+};
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** The item's own image: the variant's, else the product's. */
+function itemImageUrl(detail: ItemDetail): string | null {
+  return detail.image?.url ?? detail.product.featuredMedia?.preview?.image?.url ?? null;
+}
+
+/** "2 ×The Collection Snowboard – Large". */
+function includedItemLabel(quantity: number, detail: ItemDetail): string {
+  const variant = /^default title$/i.test(detail.title) ? "" : ` – ${detail.title}`;
+  return `${quantity > 1 ? `${quantity} × ` : ""}${detail.product.title}${variant}`;
+}
+
+/** The Online Store's publication: where the product must be for the cart to take it. */
+async function onlineStorePublicationId(graphql: AdminGraphQL): Promise<string> {
+  const data = await gql<{ publications: { nodes: Array<{ id: string; name: string | null; catalog: { title: string } | null }> } }>(
+    graphql, PUBLICATIONS, {},
+  );
+  const isOnlineStore = (s: string | null | undefined) => /^online store$/i.test(s?.trim() ?? "");
+  const pub = data.publications.nodes.find((p) => isOnlineStore(p.catalog?.title) || isOnlineStore(p.name));
+  if (!pub) throw new Error("The Online Store sales channel wasn't found.");
+  return pub.id;
+}
+
+/**
+ * Creates or updates the product a recurring bundle is sold as (see the top of
+ * this file) and records it on the bundle. Returns a problem to show the
+ * merchant, or null.
+ *
+ * Priced at the items' total. The discount, or the exact fixed price, is the
+ * pricing policy of the bundle's selling plan, like any subscription discount,
+ * so someone who opens the unlisted product and buys it one-time pays full
+ * price. It isn't subscription-only: prepaid payments go through draft orders,
+ * whose lines can't carry a selling plan.
+ *
+ * A one-time bundle's product is the parent its item lines are merged into in
+ * the cart (extensions/bundle-merge); its price comes from those lines. It
+ * "requires components", so it can't be bought on its own, unless subscribers
+ * from when the bundle was recurring still renew with it.
+ *
+ * The bundle only becomes one cart line once the product is on the Online
+ * Store (bundleVariantId set); until then it keeps adding one line per item.
+ */
+async function syncBundleProduct(graphql: AdminGraphQL, bundle: BundleWithItems): Promise<string | null> {
+  try {
+    const items = collapseBundleItems(bundle.items);
+    const found = await gql<{ nodes: Array<ItemDetail | null> }>(
+      graphql, BUNDLE_ITEM_DETAILS, { ids: items.map((i) => i.variantId) },
+    );
+    const byId = new Map(found.nodes.filter((n): n is ItemDetail => !!n?.id).map((n) => [n.id, n]));
+    const gone = items.filter((i) => !byId.has(i.variantId));
+    if (gone.length) {
+      throw new Error(`${gone.map((i) => i.title).join(", ")} no longer exist${gone.length === 1 ? "s" : ""}. Pick the products again.`);
+    }
+
+    const listTotal = Math.round(items.reduce((s, i) => s + parseFloat(byId.get(i.variantId)!.price) * i.quantity, 0) * 100) / 100;
+    const included  = items.map((i) => includedItemLabel(i.quantity, byId.get(i.variantId)!));
+    const product   = {
+      title:           bundle.name,
+      descriptionHtml: `<p>This bundle includes:</p><ul>${included.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`,
+      productType:     "Bundle",
+      tags:            [BUNDLE_PRODUCT_TAG],
+      // Bought only through the bundle block: kept out of collections, search
+      // and recommendations, but reachable by its link (which the cart uses).
+      status:          "UNLISTED",
+    };
+
+    let productId: string | null = bundle.bundleProductId;
+    let variantId: string | null = null;
+    let handle:    string | null = null;
+
+    if (productId) {
+      const data = await gql<{ product: { id: string; handle: string; variants: { nodes: Array<{ id: string }> } } | null }>(
+        graphql, BUNDLE_PRODUCT_LOOKUP, { id: productId },
+      );
+      if (data.product) {
+        const updated = await gql<{ productUpdate: { product: { handle: string } | null; userErrors: UserError[] } }>(
+          graphql, BUNDLE_PRODUCT_UPDATE, { product: { id: productId, ...product } },
+        );
+        assertNoUserErrors(updated.productUpdate.userErrors);
+        handle    = updated.productUpdate.product?.handle ?? data.product.handle;
+        variantId = data.product.variants.nodes[0]?.id ?? null;
+      } else {
+        // Deleted in the Shopify admin: make a new one.
+        productId = null;
+      }
+    }
+
+    if (!productId) {
+      // Its images come next, from syncBundleImages.
+      const created = await gql<{
+        productCreate: { product: { id: string; handle: string; variants: { nodes: Array<{ id: string }> } } | null; userErrors: UserError[] };
+      }>(graphql, BUNDLE_PRODUCT_CREATE, { product });
+      assertNoUserErrors(created.productCreate.userErrors);
+      const p = created.productCreate.product;
+      if (!p) throw new Error("Shopify created no product.");
+      productId = p.id;
+      handle    = p.handle;
+      variantId = p.variants.nodes[0]?.id ?? null;
+    }
+    if (!variantId) throw new Error("The bundle's product has no variant.");
+
+    // Recorded before anything else can fail, so a product that exists is
+    // never created twice. Not yet the variant: see below.
+    await db.productBundle.update({ where: { id: bundle.id }, data: { bundleProductId: productId } });
+
+    // Only a merge parent needs components; a product subscribers renew with
+    // must stay buyable on its own.
+    const subscribers = bundle.type === "ONE_TIME"
+      ? await db.subscription.count({ where: { bundleId: bundle.id, status: { in: ["ACTIVE", "PAUSED"] } } })
+      : 0;
+    const requiresComponents = bundle.type === "ONE_TIME" && subscribers === 0;
+
+    const priced = await gql<{ productVariantsBulkUpdate: { userErrors: UserError[] } }>(graphql, BUNDLE_VARIANT_UPDATE, {
+      productId,
+      variants: [{
+        id:              variantId,
+        price:           listTotal.toFixed(2),
+        compareAtPrice:  null,
+        taxable:         true,
+        // Stock is the items' business; the bundle itself never runs out.
+        inventoryPolicy: "CONTINUE",
+        inventoryItem:   { tracked: false, requiresShipping: true },
+        requiresComponents,
+      }],
+    });
+    assertNoUserErrors(priced.productVariantsBulkUpdate.userErrors);
+
+    try {
+      const published = await gql<{ publishablePublish: { userErrors: UserError[] } }>(graphql, BUNDLE_PRODUCT_PUBLISH, {
+        id: productId, input: [{ publicationId: await onlineStorePublicationId(graphql) }],
+      });
+      assertNoUserErrors(published.publishablePublish.userErrors);
+    } catch (err) {
+      const message = errorText(err);
+      if (/access denied|read_publications|write_publications/i.test(message)) {
+        throw new Error("the app needs permission to publish products. Open the app, accept its updated permissions, then save the bundle again.");
+      }
+      // Shopify won't publish bundle products in a store that can't sell bundles.
+      const reason = requiresComponents ? await bundleIneligibility(graphql) : null;
+      throw new Error(reason
+        ? `your store can't sell bundles yet (${reason}).`
+        : `it couldn't be published to your Online Store: ${message}`);
+    }
+
+    // On the Online Store: from now on the bundle is one cart line.
+    await db.productBundle.update({
+      where: { id: bundle.id },
+      data:  { bundleProductId: productId, bundleVariantId: variantId, bundleProductHandle: handle },
+    });
+    return null;
+
+  } catch (err) {
+    console.error(`[bundles] product sync failed for ${bundle.id}:`, errorText(err));
+    return errorText(err);
+  }
+}
+
+/**
+ * Keeps the images of a bundle's product the same as its items' images, in
+ * bundle order, so its main image is the first item's. The line in cart,
+ * checkout, orders, emails and the subscription page shows that main image.
+ *
+ * Replaced only when the items or their images change: the media the app added
+ * and a signature of the images live in the product metafield
+ * kas_bundle.images. Only the app's own media are ever removed; images the
+ * merchant adds in Shopify stay, after the items'. A product from before that
+ * record holds only what the app put there (the items' images, and the picture
+ * of them it used to draw), so all of it is the app's. Returns a problem to
+ * show the merchant, or null; the bundle works either way.
+ */
+async function syncBundleImages(graphql: AdminGraphQL, bundle: BundleWithItems): Promise<string | null> {
+  const productId = bundle.bundleProductId;
+  if (!productId) return null;
+  let unrecorded: string[] = [];   // added to the product, not yet in the record
+  try {
+    type MediaState = {
+      product: {
+        media:   { nodes: Array<{ id: string }> };
+        images:  { jsonValue: unknown } | null;
+        collage: { id: string } | null;
+      } | null;
+    };
+    const before = await gql<MediaState>(graphql, BUNDLE_PRODUCT_MEDIA, { id: productId });
+    if (!before.product) return null;
+
+    // The old picture's record; the picture itself goes with the rest below.
+    if (before.product.collage) {
+      try {
+        const cleared = await gql<{ metafieldsDelete: { userErrors: UserError[] } }>(graphql, PRODUCT_METAFIELDS_DELETE, {
+          metafields: [{ ownerId: productId, namespace: "kas_bundle", key: "collage" }],
+        });
+        assertNoUserErrors(cleared.metafieldsDelete.userErrors);
+      } catch (err) {
+        // A leftover record is untidy, not broken.
+        console.error(`[bundles] could not delete the old picture record of ${bundle.id}:`, errorText(err));
+      }
+    }
+
+    const mediaIds = before.product.media.nodes.map((n) => n.id);
+    const saved    = (before.product.images?.jsonValue ?? null) as { mediaIds?: unknown; signature?: unknown } | null;
+    const savedIds = Array.isArray(saved?.mediaIds) ? saved.mediaIds.filter((id): id is string => typeof id === "string") : null;
+    const ours     = savedIds ? mediaIds.filter((id) => savedIds.includes(id)) : mediaIds;
+
+    // The items' images in bundle order, each once.
+    const items = collapseBundleItems(bundle.items);
+    const found = await gql<{ nodes: Array<ItemDetail | null> }>(
+      graphql, BUNDLE_ITEM_DETAILS, { ids: items.map((i) => i.variantId) },
+    );
+    const byId   = new Map(found.nodes.filter((n): n is ItemDetail => !!n?.id).map((n) => [n.id, n]));
+    const images = new Map<string, string>();   // url → alt
+    for (const item of items) {
+      const detail = byId.get(item.variantId);
+      const url    = detail ? itemImageUrl(detail) : null;
+      if (detail && url && !images.has(url)) images.set(url, detail.product.title);
+    }
+    const wanted = [...images].slice(0, MAX_BUNDLE_IMAGES);
+
+    const signature = createHash("sha1").update(JSON.stringify(wanted.map(([url]) => url))).digest("hex").slice(0, 16);
+    if (savedIds && saved?.signature === signature && ours.length === savedIds.length) return null;   // up to date
+
+    const record = async (ids: string[], sig: string) => {
+      const recorded = await gql<{ metafieldsSet: { userErrors: UserError[] } }>(graphql, PRODUCT_METAFIELDS_SET, {
+        metafields: [{
+          ownerId: productId, namespace: "kas_bundle", key: "images", type: "json",
+          value: JSON.stringify({ mediaIds: ids, signature: sig }),
+        }],
+      });
+      assertNoUserErrors(recorded.metafieldsSet.userErrors);
+    };
+
+    let added: string[] = [];
+    if (wanted.length) {
+      const attached = await gql<{ productUpdate: { userErrors: UserError[] } }>(graphql, BUNDLE_MEDIA_ATTACH, {
+        product: { id: productId },
+        media:   wanted.map(([originalSource, alt]) => ({ originalSource, mediaContentType: "IMAGE", alt })),
+      });
+      assertNoUserErrors(attached.productUpdate.userErrors);
+      const after = await gql<MediaState>(graphql, BUNDLE_PRODUCT_MEDIA, { id: productId });
+      added = unrecorded = (after.product?.media.nodes.map((n) => n.id) ?? []).filter((id) => !mediaIds.includes(id));
+      if (!added.length) throw new Error("Shopify didn't add the items' images to the product.");
+
+      // Recorded with the old ones straight away, unfinished (no signature):
+      // whatever fails from here on, the next save clears all of them away.
+      await record([...ours, ...added], "");
+      unrecorded = [];
+    }
+
+    if (ours.length) {
+      const removed = await gql<{ fileDelete: { userErrors: UserError[] } }>(graphql, BUNDLE_MEDIA_DELETE, { ids: ours });
+      assertNoUserErrors(removed.fileDelete.userErrors);
+    }
+
+    // Shopify adds new media last: move them ahead of any the merchant added.
+    if (added.length && mediaIds.length > ours.length) {
+      const moved = await gql<{ productReorderMedia: { mediaUserErrors: UserError[] } }>(graphql, BUNDLE_MEDIA_REORDER, {
+        id: productId, moves: added.map((id, k) => ({ id, newPosition: String(k) })),
+      });
+      assertNoUserErrors(moved.productReorderMedia.mediaUserErrors);
+    }
+
+    await record(added, signature);
+    return null;
+
+  } catch (err) {
+    const message = errorText(err);
+    console.error(`[bundles] images failed for ${bundle.id}:`, message);
+    // Unrecorded, the images just added would stay for good: take them away,
+    // and the next save tries again.
+    if (unrecorded.length) {
+      try {
+        await gql(graphql, BUNDLE_MEDIA_DELETE, { ids: unrecorded });
+      } catch (undoErr) {
+        console.error(`[bundles] could not take back the new images of ${bundle.id}:`, errorText(undoErr));
+      }
+    }
+    return /access denied|write_files|read_files/i.test(message)
+      ? "the app needs permission to manage files. Open the app, accept its updated permissions, then save the bundle again."
+      : message;
+  }
+}
+
+/**
+ * Why Shopify won't let this store sell bundles, or null when it can (or when
+ * that can't be found out).
+ */
+async function bundleIneligibility(graphql: AdminGraphQL): Promise<string | null> {
+  try {
+    const data = await gql<{ shop: { features: { bundles: { eligibleForBundles: boolean; ineligibilityReason: string | null } } } }>(
+      graphql, BUNDLES_ELIGIBILITY, {},
+    );
+    const b = data.shop.features.bundles;
+    return b.eligibleForBundles ? null : (b.ineligibilityReason || "Shopify didn't say why");
+  } catch {
+    return null;
+  }
+}
+
+/** Returns a problem to show the merchant, or null. */
+async function deleteBundleProduct(graphql: AdminGraphQL, productId: string): Promise<string | null> {
+  try {
+    const data = await gql<{ productDelete: { userErrors: UserError[] } }>(
+      graphql, BUNDLE_PRODUCT_DELETE, { input: { id: productId } },
+    );
+    assertNoUserErrors(data.productDelete.userErrors);
+    return null;
+  } catch (err) {
+    const message = errorText(err);
+    if (/not.?found|does not exist/i.test(message)) return null;
+    console.error(`[bundles] could not delete bundle product ${productId}:`, message);
+    return `The bundle's product couldn't be deleted from Shopify: ${message}`;
+  }
+}
+
 // ─── Shopify: one-time bundle discount ───────────────────────────────────────
 
 /**
@@ -961,5 +1540,85 @@ export async function syncOneTimeBundleDiscount(graphql: AdminGraphQL, shop: str
     return /function/i.test(message)
       ? `The bundle discount isn't active yet. Deploy the app's bundle-discount function, then save the bundle again. (${message})`
       : `The bundle discount couldn't be updated in Shopify: ${message}`;
+  }
+}
+
+// ─── Shopify: one-time bundles as one cart line ──────────────────────────────
+
+const MERGE_CONFIG_KEY = "bundle-merge";
+
+/**
+ * Keeps the bundle-merge cart transform (extensions/bundle-merge) in step with
+ * the shop's active one-time bundles that have their product, installing the
+ * transform the first time one exists. It merges each such bundle's item lines
+ * into one line with its product as the parent and prices it, so cart and
+ * checkout show one bundle with its items. Bundles it doesn't cover keep their
+ * separate lines, priced by the bundle discount (syncOneTimeBundleDiscount).
+ * Returns a problem to show the merchant, or null.
+ */
+export async function syncBundleMergeConfig(graphql: AdminGraphQL, shop: string): Promise<string | null> {
+  let toMerge = 0;   // one-time bundles the cart should group
+  try {
+    const bundles = await db.productBundle.findMany({
+      where:   { shop, type: "ONE_TIME", active: true, bundleVariantId: { not: null } },
+      include: { items: true },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+    });
+    toMerge = bundles.length;
+
+    const config = JSON.stringify({
+      bundles: bundles.map((b) => ({
+        id:              b.id,
+        title:           b.name,
+        parentVariantId: b.bundleVariantId,
+        // PERCENT: the discount. FIXED_PRICE: the matching percentage, used on
+        // units outside complete sets. TIERED: unused (0); the tiers decide.
+        percent:         b.discountPercent,
+        kind:            b.kind === "BOX" ? "BOX" : "SET",
+        pricingMode:     b.pricingMode,
+        fixedPrice:      b.pricingMode === "FIXED_PRICE" ? b.fixedPrice : null,
+        minItems:        b.kind === "BOX" ? b.minItems : 0,
+        tiers:           b.pricingMode === "TIERED"
+          ? parseTiers(b.tiersJson).map(({ minItems, percent }) => ({ minItems, percent }))
+          : [],
+        // By product, like the bundle discount: any variant of an item counts.
+        lines:           collapseBundleItems(b.items).map((i) => ({ productId: i.productId, quantity: i.quantity })),
+      })),
+    });
+    const metafield = { namespace: "$app", key: MERGE_CONFIG_KEY, type: "json", value: config };
+
+    // Only this app's transforms are listed, and an app has at most one per store.
+    const found = await gql<{ cartTransforms: { nodes: Array<{ id: string }> } }>(graphql, CART_TRANSFORMS, {});
+    const transformId = found.cartTransforms.nodes[0]?.id ?? null;
+
+    if (!transformId) {
+      // Nothing to merge and nothing installed: leave Shopify alone.
+      if (!bundles.length) return null;
+      const created = await gql<{ cartTransformCreate: { userErrors: UserError[] } }>(
+        graphql, CART_TRANSFORM_CREATE, { metafields: [metafield] },
+      );
+      assertNoUserErrors(created.cartTransformCreate.userErrors);
+      return null;
+    }
+
+    const saved = await gql<{ metafieldsSet: { userErrors: UserError[] } }>(
+      graphql, CART_TRANSFORM_CONFIG_SET, { metafields: [{ ownerId: transformId, ...metafield }] },
+    );
+    assertNoUserErrors(saved.metafieldsSet.userErrors);
+    return null;
+
+  } catch (err) {
+    const message = errorText(err);
+    console.error(`[bundles] bundle merge sync failed for ${shop}:`, message);
+    if (/access denied|cart_transforms/i.test(message)) {
+      // Without the permission nothing was ever installed, so with no one-time
+      // bundles there is nothing wrong to report.
+      if (!toMerge) return null;
+      return"One-time bundles show as separate lines in the cart: the app needs permission to change how the cart shows them. Open the app, accept its updated permissions, then save the bundle again.";
+    }
+    // The usual cause before launch: the function hasn't been deployed yet.
+    return /function/i.test(message)
+      ? `One-time bundles show as separate lines in the cart until the app's bundle-merge function is deployed. Then save the bundle again. (${message})`
+      : `One-time bundles show as separate lines in the cart: the cart grouping couldn't be updated in Shopify: ${message}`;
   }
 }

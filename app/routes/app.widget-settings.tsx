@@ -19,6 +19,7 @@ import {
 } from "../config/widget-chips";
 import { syncWidgetMetafield } from "../lib/widget-metafield.server";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Design tokens ───────────────────────────────────────────
@@ -592,7 +593,7 @@ export default function WidgetSettingsPage() {
             disabled={isSaving}
             style={{
               fontSize: "13px", padding: "8px 18px", borderRadius: "9px",
-              background: savedBanner ? T.greenFg : T.purpleDark,
+              background: savedBanner ? T.greenFg : BRAND_GRADIENT,
               color: "#fff", border: "none",
               cursor: isSaving ? "not-allowed" : "pointer",
               fontWeight: 500, marginTop: "4px",

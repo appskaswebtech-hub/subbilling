@@ -26,6 +26,7 @@ import {
   type PrepaidEmailKind,
 } from "../config/payment";
 import dashboardStyles from "../styles/dashboard.css?url";
+import { BRAND_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Design tokens ───────────────────────────────────────────
@@ -420,7 +421,7 @@ export default function Settings() {
           <button
             onClick={handleSave}
             disabled={isSaving}
-            style={{ ...btn, background: T.purpleDark, color: "#fff", border: "none", marginTop: "4px" }}
+            style={{ ...btn, background: BRAND_GRADIENT, color: "#fff", border: "none", marginTop: "4px" }}
           >
             {isSaving ? "Saving…" : "Save Settings"}
           </button>
