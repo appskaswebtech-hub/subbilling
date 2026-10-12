@@ -582,7 +582,7 @@ export default function Settings() {
                   <div style={{ flex: 1 }}>
                     <Select
                       label="Send the payment link"
-                      helpText="Earlier gives customers time to pay before the cycle is due. Plans and bundles can set their own."
+                      helpText="Earlier gives customers time to pay before the cycle is due. Plans and bundles can set their own. On a plan with a shorter cycle than this, the link goes out as soon as the previous delivery is paid."
                       options={leadDayOptions}
                       value={leadDays}
                       onChange={setLeadDays}

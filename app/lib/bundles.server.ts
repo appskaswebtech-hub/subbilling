@@ -41,6 +41,7 @@ import db from "../db.server";
 import { formatUserErrors, type AdminGraphQL, type UserError } from "./subscription-contract.server";
 import {
   PREPAID_SHOPPER_NOTE,
+  cycleHours,
   parseEmailSender,
   parseLeadHours,
   parsePaymentMode,
@@ -580,7 +581,7 @@ export function parseBundleInput(raw: {
       paymentMode:        type === "RECURRING" ? parsePaymentMode(raw.paymentMode) : "POSTPAID",
       paymentEmailSender: parseEmailSender(raw.paymentEmailSender),
       prepaidLeadHours:   type === "RECURRING" && parsePaymentMode(raw.paymentMode) === "PREPAID"
-        ? parseLeadHours(raw.prepaidLeadHours)
+        ? parseLeadHours(raw.prepaidLeadHours, cycleHours(interval, intervalCount))
         : null,
       items,
     },

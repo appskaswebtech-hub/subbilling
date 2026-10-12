@@ -54,11 +54,36 @@ export const PREPAID_LEAD_OPTIONS: Array<{ label: string; value: string }> = [
   })),
 ];
 
-/** One of the offered values in hours, or null for "use the shop setting". */
-export function parseLeadHours(raw: unknown): number | null {
+/**
+ * How long one billing cycle lasts, in hours. A month counts as its shortest
+ * (28 days), so a time that fits "monthly" fits every month.
+ */
+export function cycleHours(interval: string, intervalCount: number | string): number {
+  const perUnit: Record<string, number> = { DAY: 24, WEEK: 7 * 24, MONTH: 28 * 24, YEAR: 365 * 24 };
+  const count = Number.parseInt(String(intervalCount), 10);
+  return (perUnit[String(interval).toUpperCase()] ?? perUnit.MONTH) * (count >= 1 ? count : 1);
+}
+
+/**
+ * The choices for a plan on this cycle: only the times shorter than the cycle.
+ * "2 days before" means nothing on a plan that renews every day: its next
+ * billing date is never more than a day away.
+ */
+export function prepaidLeadOptionsFor(interval: string, intervalCount: number | string): Array<{ label: string; value: string }> {
+  const cycle = cycleHours(interval, intervalCount);
+  return PREPAID_LEAD_OPTIONS.filter((o) => o.value === "" || Number(o.value) < cycle);
+}
+
+/**
+ * One of the offered values in hours, or null for "use the shop setting". With
+ * `cycle` (cycleHours), a time that doesn't fit inside the cycle is null too.
+ */
+export function parseLeadHours(raw: unknown, cycle?: number): number | null {
   if (raw === null || raw === undefined || raw === "") return null;
   const value = String(raw);
-  return PREPAID_LEAD_OPTIONS.some((o) => o.value !== "" && o.value === value) ? Number(value) : null;
+  if (!PREPAID_LEAD_OPTIONS.some((o) => o.value !== "" && o.value === value)) return null;
+  const hours = Number(value);
+  return cycle !== undefined && hours >= cycle ? null : hours;
 }
 
 /** Shown to shoppers on prepaid plans (selling plan description, bundle block). */

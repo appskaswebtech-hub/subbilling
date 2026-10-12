@@ -49,9 +49,9 @@ import {
 import {
   EMAIL_SENDER_OPTIONS,
   PAYMENT_MODE_OPTIONS,
-  PREPAID_LEAD_OPTIONS,
   parseEmailSender,
   parsePaymentMode,
+  prepaidLeadOptionsFor,
   type EmailSender,
   type PaymentMode,
 } from "../config/payment";
@@ -250,7 +250,7 @@ type EditorState = {
   intervalCount:      string;
   paymentMode:        PaymentMode;
   paymentEmailSender: EmailSender;
-  /** A PREPAID_LEAD_OPTIONS value; "" = the shop setting. */
+  /** A prepaid lead choice in hours (app/config/payment.ts); "" = the shop setting. */
   prepaidLeadHours:   string;
   items:              EditorItem[];
 };
@@ -265,6 +265,16 @@ function emptyEditor(): EditorState {
     interval: "MONTH", intervalCount: "1", paymentMode: "POSTPAID", paymentEmailSender: "SHOPIFY", prepaidLeadHours: "",
     items: [],
   };
+}
+
+/**
+ * The "Send the payment link" choices for the bundle's cycle, and the one in
+ * effect. Only times that fit the cycle are offered; one chosen before the
+ * interval was shortened no longer fits and falls back to the shop setting.
+ */
+function leadChoice(editor: EditorState): { options: Array<{ label: string; value: string }>; value: string } {
+  const options = prepaidLeadOptionsFor(editor.interval, editor.intervalCount);
+  return { options, value: options.some((o) => o.value === editor.prepaidLeadHours) ? editor.prepaidLeadHours : "" };
 }
 
 function money(amount: number, currency: string): string {
@@ -687,7 +697,7 @@ export default function Bundles() {
     fd.append("intervalCount", editor.intervalCount || "1");
     fd.append("paymentMode", editor.paymentMode);
     fd.append("paymentEmailSender", editor.paymentEmailSender);
-    fd.append("prepaidLeadHours", editor.prepaidLeadHours);
+    fd.append("prepaidLeadHours", leadChoice(editor).value);
     fd.append("items", JSON.stringify(editor.items.map((i) => ({
       productId:     i.productId,
       variantId:     i.variantId,
@@ -785,6 +795,7 @@ export default function Bundles() {
     const recurring    = editor.type === "RECURRING";
     const box          = editor.kind === "BOX";
     const mode         = editor.pricingMode;
+    const lead         = leadChoice(editor);
     const previewItems = toPreviewItems(editor.items, products, recurring);
     // Today's price of the set: the default / fixed variants at their quantities.
     const listKnown    = previewItems.length > 0 && previewItems.every((i) => i.price !== null);
@@ -1259,8 +1270,8 @@ export default function Bundles() {
                       {editor.paymentMode === "PREPAID" && (
                         <Select
                           label="Send the payment link"
-                          options={PREPAID_LEAD_OPTIONS}
-                          value={editor.prepaidLeadHours}
+                          options={lead.options}
+                          value={lead.value}
                           onChange={(v) => update("prepaidLeadHours", v)}
                           helpText="How long before each billing date the customer is emailed the link. Links go out once an hour, so it can arrive up to an hour after this point."
                         />

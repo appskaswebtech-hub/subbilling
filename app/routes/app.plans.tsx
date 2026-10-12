@@ -40,12 +40,13 @@ import { syncWidgetMetafield } from "../lib/widget-metafield.server";
 import {
   PAYMENT_MODE_OPTIONS,
   EMAIL_SENDER_OPTIONS,
-  PREPAID_LEAD_OPTIONS,
   PREPAID_SHOPPER_NOTE,
+  cycleHours,
   parsePaymentMode,
   parseEmailSender,
   parseLeadHours,
   prepaidLeadLabel,
+  prepaidLeadOptionsFor,
   type PaymentMode,
   type EmailSender,
 } from "../config/payment";
@@ -129,7 +130,7 @@ type PlanFormValues = {
   widgetBorderRadius: string;
   paymentMode: PaymentMode;
   paymentEmailSender: EmailSender;
-  /** A PREPAID_LEAD_OPTIONS value; "" = the shop setting. */
+  /** A prepaid lead choice in hours (app/config/payment.ts); "" = the shop setting. */
   prepaidLeadHours: string;
 };
 
@@ -447,8 +448,11 @@ function parsePlanForm(formData: FormData) {
 
   const paymentMode        = parsePaymentMode(formData.get("paymentMode"));
   const paymentEmailSender = parseEmailSender(formData.get("paymentEmailSender"));
-  // Only a prepaid plan sends links, so only it keeps a time of its own.
-  const prepaidLeadHours   = paymentMode === "PREPAID" ? parseLeadHours(formData.get("prepaidLeadHours")) : null;
+  // Only a prepaid plan sends links, so only it keeps a time of its own, and
+  // only one that fits inside its cycle.
+  const prepaidLeadHours   = paymentMode === "PREPAID"
+    ? parseLeadHours(formData.get("prepaidLeadHours"), cycleHours(interval, intervalCount))
+    : null;
 
   return { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender, prepaidLeadHours };
 }
@@ -2574,6 +2578,10 @@ export default function Plans() {
   const [prepaidLeadHours, setPrepaidLeadHours] = useState(
     defaultPlanFormValues().prepaidLeadHours,
   );
+  // Only the times that fit the plan's cycle are offered. One chosen before
+  // the interval was shortened no longer fits: it falls back to the shop setting.
+  const leadOptions = prepaidLeadOptionsFor(interval, intervalCount);
+  const leadValue   = leadOptions.some((o) => o.value === prepaidLeadHours) ? prepaidLeadHours : "";
   // The mode the plan had when the editor opened, so the "applies to new
   // subscribers only" note appears only when the merchant actually changes it.
   const [openedPaymentMode, setOpenedPaymentMode] = useState<PaymentMode>("POSTPAID");
@@ -2852,7 +2860,7 @@ export default function Plans() {
     fd.append("widgetBorderRadius", widgetBorderRadius.trim());
     fd.append("paymentMode", paymentMode);
     fd.append("paymentEmailSender", paymentEmailSender);
-    fd.append("prepaidLeadHours", prepaidLeadHours);
+    fd.append("prepaidLeadHours", leadValue);
     submit(fd, { method: "post" });
   }
 
@@ -3549,8 +3557,8 @@ export default function Plans() {
               {paymentMode === "PREPAID" && (
                 <Select
                   label="Send the payment link"
-                  options={PREPAID_LEAD_OPTIONS}
-                  value={prepaidLeadHours}
+                  options={leadOptions}
+                  value={leadValue}
                   onChange={setPrepaidLeadHours}
                   helpText="How long before each billing date the customer is emailed the link. Links go out once an hour, so it can arrive up to an hour after this point."
                 />
