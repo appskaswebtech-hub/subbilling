@@ -21,16 +21,17 @@ import {
   InlineStack,
   Text,
   TextField,
-  Select,
   Button,
   Banner,
   RadioButton,
 } from "@shopify/polaris";
+import { Select } from "../components/AppSelect";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { collapseBundleItems, listPrepaidBundles } from "../lib/bundles.server";
 import { parseTiers, tierPercent } from "../config/bundle-pricing";
+import { WITHOUT_BUNDLE_PRODUCTS } from "../config/bundle-product";
 import { createInitialInvoice, roundMoney, type InitialSetup, type InvoiceAddress, type InvoiceLine } from "../lib/prepaid.server";
 
 const CUSTOMER_QUERY = `#graphql
@@ -314,7 +315,7 @@ export default function NewPrepaidSubscription() {
   async function pickProducts() {
     const selection = await shopify.resourcePicker({
       type: "product", multiple: true, action: "select",
-      filter: { variants: true, draft: false, archived: false },
+      filter: { variants: true, draft: false, archived: false, query: WITHOUT_BUNDLE_PRODUCTS },
     });
     if (!selection) return;
     const kept = new Map(items.map((i) => [i.variantId, i.quantity]));

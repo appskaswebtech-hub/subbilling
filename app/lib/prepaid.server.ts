@@ -74,7 +74,8 @@ export const INVOICE_ATTRIBUTE = "_kas_invoice";
 /** Contract custom attribute marking a contract the app created from an INITIAL invoice. */
 export const PREPAID_CONTRACT_ATTRIBUTE = "_kas_prepaid_invoice";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS  = 24 * HOUR_MS;
 // Bounds one run so a backlog can't become a request that never returns.
 const MAX_PER_RUN = 100;
 // The same, for a run inside a merchant's request (runPrepaidForShop).
@@ -284,6 +285,38 @@ async function resolveSender(
     if (b) return parseEmailSender(b.paymentEmailSender);
   }
   return "SHOPIFY";
+}
+
+/**
+ * How many hours before its billing date a subscription's payment link goes
+ * out: its bundle's own setting, else its plan's, else the shop's (Settings,
+ * in days). Read at send time like the sender, so a change applies to the
+ * next link.
+ */
+async function resolveLeadHours(
+  shop: string,
+  ref: { bundleId?: string | null; sellingPlanId?: string | null },
+): Promise<number> {
+  const own = async (): Promise<number | null> => {
+    if (ref.bundleId) {
+      const b = await db.productBundle.findFirst({
+        where: { id: ref.bundleId, shop }, select: { prepaidLeadHours: true },
+      });
+      if (b) return b.prepaidLeadHours;
+    }
+    if (ref.sellingPlanId) {
+      const p = await db.sellingPlanGroup.findFirst({
+        where: { shop, shopifySellingPlanId: ref.sellingPlanId }, select: { prepaidLeadHours: true },
+      });
+      if (p) return p.prepaidLeadHours;
+      const b = await db.productBundle.findFirst({
+        where: { shop, shopifySellingPlanId: ref.sellingPlanId }, select: { prepaidLeadHours: true },
+      });
+      if (b) return b.prepaidLeadHours;
+    }
+    return null;
+  };
+  return (await own()) ?? (await settingsFor(shop)).leadDays * 24;
 }
 
 function parseSetup(invoice: { setupJson: string | null }): InitialSetup | null {
@@ -565,8 +598,9 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
 
 /**
  * Invoices every ACTIVE prepaid subscription whose billing date falls within
- * the shop's lead time. Called hourly by api.cron.reconcile.ts, so a link goes
- * out within the hour a subscription enters its lead window.
+ * its lead time (its plan's or bundle's, else the shop's: resolveLeadHours).
+ * Called hourly by api.cron.reconcile.ts, so a link goes out within the hour a
+ * subscription enters its lead window.
  *
  * Safe to re-run: a cycle that already has a live invoice is skipped, and a
  * FAILED one is retried.
@@ -582,8 +616,8 @@ export async function issueDueRenewalInvoices(opts: { shop?: string; max?: numbe
   const now = new Date();
   const max = opts.max ?? MAX_PER_RUN;
 
-  // Widest possible lead time (the Settings maximum is 14 days); each shop's own
-  // lead time is applied below.
+  // Widest possible lead time (14 days, in Settings and per plan alike); each
+  // subscription's own lead time is applied below.
   const due = await db.subscription.findMany({
     where: {
       ...(opts.shop ? { shop: opts.shop } : {}),
@@ -601,9 +635,13 @@ export async function issueDueRenewalInvoices(opts: { shop?: string; max?: numbe
   for (const sub of due) {
     if (sent >= max) break;
 
-    if (!leadCache.has(sub.shop)) leadCache.set(sub.shop, (await settingsFor(sub.shop)).leadDays);
-    const leadDays = leadCache.get(sub.shop)!;
-    if (sub.nextBillingDate.getTime() > now.getTime() + leadDays * DAY_MS) continue;
+    // One lookup per plan or bundle per run.
+    const leadKey = `${sub.shop}|${sub.bundleId ?? ""}|${sub.sellingPlanId ?? ""}`;
+    if (!leadCache.has(leadKey)) {
+      leadCache.set(leadKey, await resolveLeadHours(sub.shop, { bundleId: sub.bundleId, sellingPlanId: sub.sellingPlanId }));
+    }
+    const leadHours = leadCache.get(leadKey)!;
+    if (sub.nextBillingDate.getTime() > now.getTime() + leadHours * HOUR_MS) continue;
 
     try {
       const existing = await db.prepaidInvoice.findUnique({

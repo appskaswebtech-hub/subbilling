@@ -18,11 +18,11 @@ import {
   Button,
   Modal,
   TextField,
-  Select,
   Banner,
   Toast,
   Frame,
 } from "@shopify/polaris";
+import { Select } from "../components/AppSelect";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -40,14 +40,18 @@ import { syncWidgetMetafield } from "../lib/widget-metafield.server";
 import {
   PAYMENT_MODE_OPTIONS,
   EMAIL_SENDER_OPTIONS,
+  PREPAID_LEAD_OPTIONS,
   PREPAID_SHOPPER_NOTE,
   parsePaymentMode,
   parseEmailSender,
+  parseLeadHours,
+  prepaidLeadLabel,
   type PaymentMode,
   type EmailSender,
 } from "../config/payment";
 import dashboardStyles from "../styles/dashboard.css?url";
 import { BRAND_GRADIENT } from "../config/theme";
+import { WITHOUT_BUNDLE_PRODUCTS } from "../config/bundle-product";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
 // ─── Types ────────────────────────────────────────────────────
@@ -104,6 +108,8 @@ type PlanGroup = {
   paymentMode?: string;
   /** "SHOPIFY" | "SMTP" — who sends a prepaid plan's payment email. */
   paymentEmailSender?: string;
+  /** Hours before the billing date a prepaid plan's link is sent; null = the shop setting. */
+  prepaidLeadHours?: number | null;
   productCount?: number;
   assigned?: AssignedProduct[];
 };
@@ -123,6 +129,8 @@ type PlanFormValues = {
   widgetBorderRadius: string;
   paymentMode: PaymentMode;
   paymentEmailSender: EmailSender;
+  /** A PREPAID_LEAD_OPTIONS value; "" = the shop setting. */
+  prepaidLeadHours: string;
 };
 
 // Offered in the plan editor. "" inherits Settings → Widget designs; the rest
@@ -374,6 +382,7 @@ function defaultPlanFormValues(): PlanFormValues {
     widgetBorderRadius: "",
     paymentMode: "POSTPAID",
     paymentEmailSender: "SHOPIFY",
+    prepaidLeadHours: "",
   };
 }
 
@@ -438,8 +447,10 @@ function parsePlanForm(formData: FormData) {
 
   const paymentMode        = parsePaymentMode(formData.get("paymentMode"));
   const paymentEmailSender = parseEmailSender(formData.get("paymentEmailSender"));
+  // Only a prepaid plan sends links, so only it keeps a time of its own.
+  const prepaidLeadHours   = paymentMode === "PREPAID" ? parseLeadHours(formData.get("prepaidLeadHours")) : null;
 
-  return { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender };
+  return { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender, prepaidLeadHours };
 }
 
 function buildSellingPlanPayload({
@@ -697,12 +708,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       : 0;
 
   // ── Fetch all store products for the picker ──
+  // Not the products the app made for bundles: a plan is assigned to real
+  // products, and a bundle has its own plan.
   let allProducts: PickerProduct[] = [];
   try {
     const productsRes = await admin.graphql(
       `#graphql
-      query getAllProducts {
-        products(first: 100) {
+      query getAllProducts($query: String!) {
+        products(first: 100, query: $query) {
           edges {
             node {
               id
@@ -714,6 +727,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
           }
         }
       }`,
+      { variables: { query: WITHOUT_BUNDLE_PRODUCTS } },
     );
     const productsResult = await productsRes.json();
     allProducts = (productsResult?.data?.products?.edges ?? []).map(
@@ -805,7 +819,7 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender } = parsed;
+    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender, prepaidLeadHours } = parsed;
     const { groupInput, sellingPlanInput } = buildSellingPlanPayload({
       name,
       interval,
@@ -898,6 +912,7 @@ export async function action({ request }: ActionFunctionArgs) {
         widgetBorderRadius,
         paymentMode,
         paymentEmailSender,
+        prepaidLeadHours,
       },
     });
 
@@ -929,7 +944,7 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender } = parsed;
+    const { name, interval, intervalCount, discount, discountType, paymentMode, paymentEmailSender, prepaidLeadHours } = parsed;
     const { groupInput, sellingPlanInput } = buildSellingPlanPayload({
       name,
       interval,
@@ -1037,6 +1052,7 @@ export async function action({ request }: ActionFunctionArgs) {
         // being billed the way they signed up for.
         paymentMode,
         paymentEmailSender,
+        prepaidLeadHours,
         // Only when resolved — a group with no Shopify counterpart must not have
         // an existing key overwritten with null.
         ...(sellingPlanId ? { shopifySellingPlanId: sellingPlanId } : {}),
@@ -1503,6 +1519,9 @@ function PlanCard({
                 : ""}
               {plan.paymentMode === "PREPAID"
                 ? ` · Prepaid (${plan.paymentEmailSender === "SMTP" ? "your email server" : "Shopify invoice"})`
+                : ""}
+              {plan.paymentMode === "PREPAID" && typeof plan.prepaidLeadHours === "number"
+                ? ` · link ${prepaidLeadLabel(plan.prepaidLeadHours)}`
                 : ""}
             </Text>
           </div>
@@ -2552,6 +2571,9 @@ export default function Plans() {
   const [paymentEmailSender, setPaymentEmailSender] = useState<EmailSender>(
     defaultPlanFormValues().paymentEmailSender,
   );
+  const [prepaidLeadHours, setPrepaidLeadHours] = useState(
+    defaultPlanFormValues().prepaidLeadHours,
+  );
   // The mode the plan had when the editor opened, so the "applies to new
   // subscribers only" note appears only when the merchant actually changes it.
   const [openedPaymentMode, setOpenedPaymentMode] = useState<PaymentMode>("POSTPAID");
@@ -2830,6 +2852,7 @@ export default function Plans() {
     fd.append("widgetBorderRadius", widgetBorderRadius.trim());
     fd.append("paymentMode", paymentMode);
     fd.append("paymentEmailSender", paymentEmailSender);
+    fd.append("prepaidLeadHours", prepaidLeadHours);
     submit(fd, { method: "post" });
   }
 
@@ -2849,6 +2872,7 @@ export default function Plans() {
     setWidgetBorderRadius(defaults.widgetBorderRadius);
     setPaymentMode(defaults.paymentMode);
     setPaymentEmailSender(defaults.paymentEmailSender);
+    setPrepaidLeadHours(defaults.prepaidLeadHours);
     setOpenedPaymentMode(defaults.paymentMode);
     setEditorOpen(true);
   }
@@ -2875,6 +2899,8 @@ export default function Plans() {
     setPaymentMode(mode);
     setOpenedPaymentMode(mode);
     setPaymentEmailSender(parseEmailSender(plan.paymentEmailSender));
+    // null is "use the shop setting" and must open as that choice, not as 0.
+    setPrepaidLeadHours(typeof plan.prepaidLeadHours === "number" ? String(plan.prepaidLeadHours) : "");
     setEditorOpen(true);
   }
 
@@ -3518,6 +3544,15 @@ export default function Plans() {
                       ? "Sent from the email server set up in Settings → Prepaid & email. If it isn't set up, the Shopify invoice email is used instead."
                       : "Shopify emails its own invoice with a secure checkout link."
                   }
+                />
+              )}
+              {paymentMode === "PREPAID" && (
+                <Select
+                  label="Send the payment link"
+                  options={PREPAID_LEAD_OPTIONS}
+                  value={prepaidLeadHours}
+                  onChange={setPrepaidLeadHours}
+                  helpText="How long before each billing date the customer is emailed the link. Links go out once an hour, so it can arrive up to an hour after this point."
                 />
               )}
               {editingPlanId && paymentMode !== openedPaymentMode && (

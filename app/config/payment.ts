@@ -25,6 +25,42 @@ export function parseEmailSender(raw: unknown): EmailSender {
   return raw === "SMTP" ? "SMTP" : "SHOPIFY";
 }
 
+// ─── When a prepaid payment link goes out ────────────────────────────────────
+// A prepaid plan or bundle can say how long before each billing date its link
+// is emailed, in hours. "" (stored as null) leaves it to the shop-wide setting
+// in Settings, which is in days. Links are sent by an hourly job, so the
+// choices are no finer than a couple of hours.
+
+const HOUR_CHOICES = [2, 4, 6, 12];
+const DAY_CHOICES  = [1, 2, 3, 5, 7, 10, 14];
+
+/** "6 hours before", "2 days before", "on the billing date". */
+export function prepaidLeadLabel(hours: number): string {
+  if (hours <= 0) return "on the billing date";
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return `${days} day${days === 1 ? "" : "s"} before`;
+  }
+  return `${hours} hour${hours === 1 ? "" : "s"} before`;
+}
+
+const sentence = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+export const PREPAID_LEAD_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: "Use the shop setting", value: "" },
+  ...[0, ...HOUR_CHOICES, ...DAY_CHOICES.map((d) => d * 24)].map((h) => ({
+    label: sentence(prepaidLeadLabel(h)),
+    value: String(h),
+  })),
+];
+
+/** One of the offered values in hours, or null for "use the shop setting". */
+export function parseLeadHours(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const value = String(raw);
+  return PREPAID_LEAD_OPTIONS.some((o) => o.value !== "" && o.value === value) ? Number(value) : null;
+}
+
 /** Shown to shoppers on prepaid plans (selling plan description, bundle block). */
 export const PREPAID_SHOPPER_NOTE =
   "You'll get an email with a link to pay before each delivery.";

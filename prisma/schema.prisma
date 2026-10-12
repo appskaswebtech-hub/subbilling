@@ -71,6 +71,10 @@ model SellingPlanGroup {
   // "SMTP" (the merchant's own server, configured in AppSettings). Read at send
   // time, so a change applies to the next email.
   paymentEmailSender String @default("SHOPIFY")
+  // How many hours before each billing date a prepaid plan's payment link is
+  // emailed (app/config/payment.ts, PREPAID_LEAD_OPTIONS). Null = the shop-wide
+  // AppSettings.prepaidInvoiceLeadDays. Read at send time too.
+  prepaidLeadHours   Int?
 
   // ── Leftover: unused ────────────────────────────────────────
   // Added for a custom per-cycle billing schedule whose code was later reverted.
@@ -351,6 +355,7 @@ model ProductBundle {
   intervalCount      Int      @default(1)
   paymentMode        String   @default("POSTPAID")    // see SellingPlanGroup.paymentMode
   paymentEmailSender String   @default("SHOPIFY")
+  prepaidLeadHours   Int?                             // see SellingPlanGroup.prepaidLeadHours
   shopifyGroupId       String?
   shopifySellingPlanId String?
   // The Shopify product a recurring bundle is sold as, so cart, checkout, the

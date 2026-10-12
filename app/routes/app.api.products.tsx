@@ -1,6 +1,7 @@
 import type { LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
+import { WITHOUT_BUNDLE_PRODUCTS } from "../config/bundle-product";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
@@ -9,6 +10,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   if (!q || q.length < 2) return json({ variants: [] });
 
+  // The search, minus the products the app made for bundles.
   const response = await admin.graphql(`
     query searchProducts($query: String!) {
       products(first: 10, query: $query) {
@@ -30,7 +32,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       }
     }
-  `, { variables: { query: q } });
+  `, { variables: { query: `${q} ${WITHOUT_BUNDLE_PRODUCTS}` } });
 
   const data = await response.json();
   const variants: any[] = [];

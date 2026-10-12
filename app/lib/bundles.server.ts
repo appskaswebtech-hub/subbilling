@@ -42,11 +42,13 @@ import { formatUserErrors, type AdminGraphQL, type UserError } from "./subscript
 import {
   PREPAID_SHOPPER_NOTE,
   parseEmailSender,
+  parseLeadHours,
   parsePaymentMode,
   type EmailSender,
   type PaymentMode,
 } from "../config/payment";
 import { parseBundleDesign, type BundleDesign } from "../config/bundle-designs";
+import { BUNDLE_PRODUCT_TAG } from "../config/bundle-product";
 import { writeBundleMetafield } from "./bundle-metafield.server";
 import {
   MAX_TIERS,
@@ -359,6 +361,8 @@ export interface BundleInput {
   intervalCount:      number;
   paymentMode:        PaymentMode;
   paymentEmailSender: EmailSender;
+  /** Hours before the billing date a prepaid bundle's link is sent; null = the shop setting. */
+  prepaidLeadHours:   number | null;
   items:              BundleItemInput[];
 }
 
@@ -425,7 +429,7 @@ export function numericId(gid: string | null | undefined): string {
 export function parseBundleInput(raw: {
   name?: unknown; type?: unknown; design?: unknown; discountPercent?: unknown; active?: unknown;
   interval?: unknown; intervalCount?: unknown; paymentMode?: unknown;
-  paymentEmailSender?: unknown; items?: unknown; showOn?: unknown; baseProducts?: unknown;
+  paymentEmailSender?: unknown; prepaidLeadHours?: unknown; items?: unknown; showOn?: unknown; baseProducts?: unknown;
   kind?: unknown; pricingMode?: unknown; fixedPrice?: unknown; minItems?: unknown; tiers?: unknown;
 }): { ok: true; value: BundleInput } | { ok: false; error: string } {
   const name = String(raw.name ?? "").trim();
@@ -575,6 +579,9 @@ export function parseBundleInput(raw: {
       // bundle is simply bought at checkout.
       paymentMode:        type === "RECURRING" ? parsePaymentMode(raw.paymentMode) : "POSTPAID",
       paymentEmailSender: parseEmailSender(raw.paymentEmailSender),
+      prepaidLeadHours:   type === "RECURRING" && parsePaymentMode(raw.paymentMode) === "PREPAID"
+        ? parseLeadHours(raw.prepaidLeadHours)
+        : null,
       items,
     },
   };
@@ -779,6 +786,7 @@ export async function saveBundle(
     intervalCount:      input.intervalCount,
     paymentMode:        input.paymentMode,
     paymentEmailSender: input.paymentEmailSender,
+    prepaidLeadHours:   input.prepaidLeadHours,
   };
   const items = input.items.map(({ productId, variantId, handle, title, quantity, variantChoice }) => ({
     productId, variantId, handle, title, quantity, variantChoice,
@@ -1121,7 +1129,7 @@ async function deleteBundlePlan(graphql: AdminGraphQL, bundle: { id: string; sho
 
 // ─── Shopify: the product a recurring bundle is sold as ──────────────────────
 
-export const BUNDLE_PRODUCT_TAG = "kas-bundle";
+export { BUNDLE_PRODUCT_TAG };
 
 /** The most item images the bundle's product gets. */
 const MAX_BUNDLE_IMAGES = 10;

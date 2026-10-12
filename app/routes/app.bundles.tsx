@@ -31,11 +31,11 @@ import {
   Badge,
   Banner,
   TextField,
-  Select,
   Thumbnail,
   EmptyState,
   Link,
 } from "@shopify/polaris";
+import { Select } from "../components/AppSelect";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import {
@@ -49,6 +49,7 @@ import {
 import {
   EMAIL_SENDER_OPTIONS,
   PAYMENT_MODE_OPTIONS,
+  PREPAID_LEAD_OPTIONS,
   parseEmailSender,
   parsePaymentMode,
   type EmailSender,
@@ -71,6 +72,7 @@ import {
 } from "../config/bundle-pricing";
 import { BundlePreview, MiniBundlePreview, type PreviewItem } from "../components/BundlePreview";
 import { BRAND_GRADIENT } from "../config/theme";
+import { WITHOUT_BUNDLE_PRODUCTS } from "../config/bundle-product";
 
 const ACCENT = "#5B4FCB";
 
@@ -182,6 +184,7 @@ export async function action({ request }: ActionFunctionArgs) {
       intervalCount:      form.get("intervalCount"),
       paymentMode:        form.get("paymentMode"),
       paymentEmailSender: form.get("paymentEmailSender"),
+      prepaidLeadHours:   form.get("prepaidLeadHours"),
       items:              form.get("items"),
       showOn:             form.get("showOn"),
       baseProducts:       form.get("baseProducts"),
@@ -247,6 +250,8 @@ type EditorState = {
   intervalCount:      string;
   paymentMode:        PaymentMode;
   paymentEmailSender: EmailSender;
+  /** A PREPAID_LEAD_OPTIONS value; "" = the shop setting. */
+  prepaidLeadHours:   string;
   items:              EditorItem[];
 };
 
@@ -257,7 +262,7 @@ function emptyEditor(): EditorState {
     id: null, name: "", type: "RECURRING", design: "classic", showOn: "ITEMS", baseProducts: [],
     kind: "SET", pricingMode: "PERCENT", discountPercent: "10", fixedPrice: "", minItems: "3", tiers: DEFAULT_TIERS,
     active: true,
-    interval: "MONTH", intervalCount: "1", paymentMode: "POSTPAID", paymentEmailSender: "SHOPIFY",
+    interval: "MONTH", intervalCount: "1", paymentMode: "POSTPAID", paymentEmailSender: "SHOPIFY", prepaidLeadHours: "",
     items: [],
   };
 }
@@ -573,6 +578,7 @@ export default function Bundles() {
       intervalCount:      String(b.intervalCount),
       paymentMode:        parsePaymentMode(b.paymentMode),
       paymentEmailSender: parseEmailSender(b.paymentEmailSender),
+      prepaidLeadHours:   typeof b.prepaidLeadHours === "number" ? String(b.prepaidLeadHours) : "",
       items,
     } };
   }
@@ -583,7 +589,7 @@ export default function Bundles() {
       type:     "product",
       multiple: true,
       action:   "select",
-      filter:   { variants: true, draft: false, archived: false },
+      filter:   { variants: true, draft: false, archived: false, query: WITHOUT_BUNDLE_PRODUCTS },
       // Re-open with the bundle ticked: whole products where the shopper picks,
       // the one variant where it is fixed.
       selectionIds: editor.items.map((i) =>
@@ -637,7 +643,7 @@ export default function Bundles() {
       type:         "product",
       multiple:     true,
       action:       "select",
-      filter:       { variants: false, draft: false, archived: false },
+      filter:       { variants: false, draft: false, archived: false, query: WITHOUT_BUNDLE_PRODUCTS },
       selectionIds: editor.baseProducts.map((p) => ({ id: p.productId })),
     });
     if (!selection) return;
@@ -681,6 +687,7 @@ export default function Bundles() {
     fd.append("intervalCount", editor.intervalCount || "1");
     fd.append("paymentMode", editor.paymentMode);
     fd.append("paymentEmailSender", editor.paymentEmailSender);
+    fd.append("prepaidLeadHours", editor.prepaidLeadHours);
     fd.append("items", JSON.stringify(editor.items.map((i) => ({
       productId:     i.productId,
       variantId:     i.variantId,
@@ -1247,6 +1254,15 @@ export default function Bundles() {
                           options={EMAIL_SENDER_OPTIONS}
                           value={editor.paymentEmailSender}
                           onChange={(v) => update("paymentEmailSender", parseEmailSender(v))}
+                        />
+                      )}
+                      {editor.paymentMode === "PREPAID" && (
+                        <Select
+                          label="Send the payment link"
+                          options={PREPAID_LEAD_OPTIONS}
+                          value={editor.prepaidLeadHours}
+                          onChange={(v) => update("prepaidLeadHours", v)}
+                          helpText="How long before each billing date the customer is emailed the link. Links go out once an hour, so it can arrive up to an hour after this point."
                         />
                       )}
                     </BlockStack>
