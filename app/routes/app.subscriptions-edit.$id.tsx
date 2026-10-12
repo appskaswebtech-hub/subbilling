@@ -706,6 +706,13 @@ export default function SubscriptionDetail() {
               <DetailRow label="Plan">
                 <Text as="span" variant="bodySm" tone="subdued">{s.planName}</Text>
               </DetailRow>
+              <DetailRow label="Payment">
+                <Text as="span" variant="bodySm">
+                  {s.paymentMode === "PREPAID"
+                    ? "Prepaid: pay link before each cycle"
+                    : "Postpaid: card charged automatically"}
+                </Text>
+              </DetailRow>
               <DetailRow label="Price">
                 <Text as="span" variant="bodySm" fontWeight="semibold">${s.price.toFixed(2)}</Text>
               </DetailRow>

@@ -173,6 +173,61 @@ function ColorSwatch({
   );
 }
 
+/**
+ * One choice from a short list, as a row of pills rather than a dropdown.
+ *
+ * A dropdown's list is drawn by the browser, and at page zooms other than 100%
+ * some browsers size that list's window wrongly, leaving a white box around the
+ * options. Pills open nothing, so there is nothing to mis-size.
+ */
+function PillChoice({
+  label,
+  options,
+  value,
+  onChange,
+  helpText,
+}: {
+  label: string;
+  options: Array<{ label: string; value: string }>;
+  value: string;
+  onChange: (v: string) => void;
+  helpText?: string;
+}) {
+  return (
+    <BlockStack gap="100">
+      <Text as="span" variant="bodyMd">{label}</Text>
+      <div role="group" aria-label={label} style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+        {options.map((o) => {
+          const on = o.value === value;
+          return (
+            <button
+              key={o.value || "inherit"}
+              type="button"
+              aria-pressed={on}
+              onClick={() => onChange(o.value)}
+              style={{
+                fontSize: "13px",
+                padding: "6px 14px",
+                borderRadius: "999px",
+                cursor: "pointer",
+                border: on ? "1px solid transparent" : "1px solid var(--p-color-border)",
+                background: on ? BRAND_GRADIENT : "var(--p-color-bg-surface)",
+                color: on ? "#fff" : "var(--p-color-text)",
+                fontWeight: on ? 600 : 400,
+              }}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      {helpText && (
+        <Text as="p" variant="bodyMd" tone="subdued">{helpText}</Text>
+      )}
+    </BlockStack>
+  );
+}
+
 // "none" is the sentinel written on install and on a declined approval — a shop
 // that has not chosen any plan yet. It is deliberately NOT "free": Free is a
 // real, merchant-approved plan with Basic-equivalent limits.
@@ -3473,7 +3528,7 @@ export default function Plans() {
                 </Banner>
               )}
 
-              <Select
+              <PillChoice
                 label="Widget design"
                 options={WIDGET_DESIGN_OPTIONS}
                 value={widgetDesign}

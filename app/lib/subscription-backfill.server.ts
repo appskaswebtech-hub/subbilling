@@ -48,6 +48,8 @@ export const CONTRACTS_PAGE_QUERY = `
 export interface BackfillSummary {
   created: number;
   updated: number;
+  /** Existing rows saved as postpaid that took their plan's prepaid mode (see upsertContractLocally). */
+  switchedToPrepaid: number;
   failed:  Array<{ id: string; reason: string }>;
   /** True when the cap stopped it before Shopify ran out of contracts. */
   truncated: boolean;
@@ -79,7 +81,7 @@ export async function backfillContracts(
   opts:    { max?: number } = {},
 ): Promise<BackfillSummary> {
   const max     = opts.max ?? DEFAULT_MAX;
-  const summary: BackfillSummary = { created: 0, updated: 0, failed: [], truncated: false };
+  const summary: BackfillSummary = { created: 0, updated: 0, switchedToPrepaid: 0, failed: [], truncated: false };
 
   let after: string | null = null;
   let seen = 0;
@@ -100,9 +102,10 @@ export async function backfillContracts(
     for (const contract of nodes) {
       seen += 1;
       try {
-        const { created } = await upsertContractLocally(shop, contract);
+        const { created, switchedToPrepaid } = await upsertContractLocally(shop, contract);
         if (created) summary.created += 1;
         else         summary.updated += 1;
+        if (switchedToPrepaid) summary.switchedToPrepaid += 1;
       } catch (err: any) {
         summary.failed.push({
           id:     contract?.id ?? "(unknown)",

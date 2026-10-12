@@ -331,6 +331,8 @@ export function advanceBillingDate(from: Date, frequency: string): Date {
 export interface UpsertResult {
   created: boolean;
   id:      string;
+  /** An existing postpaid row that had never been billed took its plan's prepaid mode. */
+  switchedToPrepaid: boolean;
 }
 
 export async function upsertContractLocally(
@@ -369,19 +371,32 @@ export async function upsertContractLocally(
 
   const existing = await prisma.subscription.findUnique({
     where:  { shopifyContractId: contractGid },
-    select: { id: true },
+    select: { id: true, paymentMode: true },
   });
 
   // Payment mode is fixed when the subscription is created. A plan later
   // switched between prepaid and postpaid affects new subscribers only, so it
-  // is resolved on create and never touched on update.
-  const payment = existing
-    ? null
-    : await resolvePaymentModeForPlan(shop, first?.sellingPlanId);
+  // is resolved on create and not touched on update.
+  //
+  // One exception: a live postpaid row the app has never recorded a billing
+  // attempt for. Sync used to save every contract as postpaid, because it
+  // didn't read the selling plan, and a prepaid customer saved that way would
+  // have their card charged. Nothing has been billed under that mode yet, so
+  // such a row takes its plan's mode now. Any billing history at all, which
+  // every subscription made at checkout has from the start, leaves it alone.
+  const neverBilled = !!existing && existing.paymentMode === "POSTPAID" && status !== "CANCELLED"
+    && (await prisma.billingAttempt.count({ where: { subscriptionId: existing.id } })) === 0;
+
+  const payment = !existing || neverBilled
+    ? await resolvePaymentModeForPlan(shop, first?.sellingPlanId)
+    : null;
+  const switchedToPrepaid = neverBilled && payment?.paymentMode === "PREPAID";
 
   const row = await prisma.subscription.upsert({
     where:  { shopifyContractId: contractGid },
-    update: data,
+    update: switchedToPrepaid
+      ? { ...data, paymentMode: "PREPAID", bundleId: payment?.bundleId ?? null }
+      : data,
     create: {
       shop,
       shopifyContractId: contractGid,
@@ -397,8 +412,9 @@ export async function upsertContractLocally(
   // A new prepaid row gets its payment hold straight away, before the billing
   // cron can see it as due and charge the card (see prepaid-hold.server.ts).
   // This is the one place every new row passes through: the contracts/create
-  // webhook, Sync from Shopify and app-created contracts.
-  if (!existing) await ensurePrepaidHold(row.id);
+  // webhook, Sync from Shopify and app-created contracts. A row just switched
+  // to prepaid needs one for the same reason.
+  if (!existing || switchedToPrepaid) await ensurePrepaidHold(row.id);
 
-  return { created: !existing, id: row.id };
+  return { created: !existing, id: row.id, switchedToPrepaid };
 }

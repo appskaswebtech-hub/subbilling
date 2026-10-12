@@ -613,7 +613,7 @@ export default function Subscriptions() {
   // in-flight state rather than reusing the revalidator's.
   const isSyncing = navigation.state !== "idle" && navigation.formData?.get("intent") === "sync";
   const syncResult = (actionData as { sync?: {
-    created: number; updated: number;
+    created: number; updated: number; switchedToPrepaid: number;
     failed: Array<{ id: string; reason: string }>;
     truncated: boolean;
   } } | undefined)?.sync;
@@ -884,6 +884,9 @@ export default function Subscriptions() {
           >
             <Text as="p">
               {syncResult.created} added · {syncResult.updated} updated
+              {syncResult.switchedToPrepaid
+                ? ` · ${syncResult.switchedToPrepaid} subscription${syncResult.switchedToPrepaid === 1 ? "" : "s"} switched to prepaid`
+                : ""}
               {syncResult.failed.length ? ` · ${syncResult.failed.length} failed: ${syncResult.failed[0].reason}` : ""}
               {syncResult.truncated ? " · stopped at the page limit; run again for the rest" : ""}
             </Text>
@@ -1068,14 +1071,14 @@ export default function Subscriptions() {
             <div style={{ overflowX: "auto",  borderRadius: "10px", border: "1px solid #E5E7EB" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
                 <colgroup>
-                  <col style={{ width: "22%" }} />
-                  <col style={{ width: "16%" }} />
+                  <col style={{ width: "19%" }} />
+                  <col style={{ width: "15%" }} />
                   <col style={{ width: "13%" }} />
-                  <col style={{ width: "10%" }} />
+                  <col style={{ width: "12%" }} />
                   <col style={{ width: "11%" }} />
                   <col style={{ width: "10%" }} />
                   <col style={{ width: "10%" }} />
-                  <col style={{ width: "8%"  }} />
+                  <col style={{ width: "10%" }} />
                 </colgroup>
                 <thead>
                   <tr>
@@ -1240,7 +1243,9 @@ export default function Subscriptions() {
                             const note = prepaidNote(inv);
                             return (
                               <div
-                                style={{ fontSize: "11px", color: note.color, marginTop: "3px" }}
+                                // Wraps: the cell itself is one line with an ellipsis,
+                                // which cut the due date off.
+                                style={{ fontSize: "11px", color: note.color, marginTop: "3px", whiteSpace: "normal", lineHeight: 1.35 }}
                                 title={inv?.error ?? undefined}
                               >
                                 {note.text}
@@ -1276,7 +1281,8 @@ export default function Subscriptions() {
 
                         {/* Actions */}
                         <td style={{ ...cell, overflow: "visible" }} onClick={(e) => e.stopPropagation()}>
-                          <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "flex-start" }}>
+                          {/* Stacked, so a second button sits under View inside the column. */}
+                          <div style={{ display: "flex", flexDirection: "column", gap: "6px", alignItems: "flex-start" }}>
                             {/* View */}
                             <button
                               onClick={() => navigate(`/app/subscriptions-edit/${s.id}`)}
