@@ -34,7 +34,7 @@ import {
 } from "../lib/subscription-contract.server";
 import { backfillContracts } from "../lib/subscription-backfill.server";
 import { syncCommissionFromShopify, type CommissionSyncSummary } from "../lib/commission-sync.server";
-import { resendInvoice, cancelInitialInvoice } from "../lib/prepaid.server";
+import { resendInvoice, cancelInitialInvoice, runPrepaidForShop, type PrepaidRunSummary } from "../lib/prepaid.server";
 import { BRAND_GRADIENT, SOFT_GRADIENT } from "../config/theme";
 export const links = () => [{ rel: "stylesheet", href: dashboardStyles }];
 
@@ -190,7 +190,12 @@ export async function action({ request }: ActionFunctionArgs) {
     // contracts are what this button is for.
     const commission = await syncCommissionFromShopify(admin.graphql, session.shop);
 
-    return json({ ok: true, sync: summary, commission });
+    // Prepaid payment links are otherwise sent only by the hourly job, so a
+    // shop where it isn't running would never email one. Sent here too, and
+    // reported, so the merchant sees a link go out or why it couldn't.
+    const prepaid = await runPrepaidForShop(session.shop);
+
+    return json({ ok: true, sync: summary, commission, prepaid });
   }
 
   // ── Prepaid payment links ───────────────────────────────────
@@ -620,6 +625,13 @@ export default function Subscriptions() {
   const commissionProblem =
     !!commissionSync && (!!commissionSync.error || commissionSync.missingAtShopify > 0);
 
+  // Prepaid payment links sent, and payments recorded, during the same sync.
+  const prepaidSync = (actionData as { prepaid?: PrepaidRunSummary } | undefined)?.prepaid;
+  const prepaidDone = [
+    prepaidSync?.sent ? `${prepaidSync.sent} payment link${prepaidSync.sent === 1 ? "" : "s"} sent` : "",
+    prepaidSync?.paid ? `${prepaidSync.paid} payment${prepaidSync.paid === 1 ? "" : "s"} recorded` : "",
+  ].filter(Boolean).join(" · ");
+
   const [searchInput,  setSearchInput]  = useState(params.get("search") ?? "");
   const [actionError,  setActionError]  = useState<string | null>(null);
   const [statusOpen,   setStatusOpen]   = useState(false);
@@ -867,7 +879,7 @@ export default function Subscriptions() {
         )}
         {syncResult && (
           <Banner
-            tone={syncResult.failed.length || commissionProblem ? "warning" : "success"}
+            tone={syncResult.failed.length || commissionProblem || prepaidSync?.failed.length ? "warning" : "success"}
             title="Sync complete"
           >
             <Text as="p">
@@ -887,6 +899,14 @@ export default function Subscriptions() {
                   ? ` · ${commissionSync.missingAtShopify} charge${commissionSync.missingAtShopify === 1 ? "" : "s"} in this app weren't found at Shopify`
                   : ""}
                 {commissionSync.truncated ? " · stopped at the record limit" : ""}
+              </Text>
+            )}
+
+            {prepaidDone && <Text as="p">Prepaid: {prepaidDone}</Text>}
+            {!!prepaidSync?.failed.length && (
+              <Text as="p">
+                A payment link could not be sent: {prepaidSync.failed[0]}
+                {prepaidSync.failed.length > 1 ? ` (and ${prepaidSync.failed.length - 1} other problem${prepaidSync.failed.length === 2 ? "" : "s"})` : ""}
               </Text>
             )}
           </Banner>

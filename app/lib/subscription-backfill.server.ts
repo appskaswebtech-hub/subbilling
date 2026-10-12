@@ -22,6 +22,9 @@ import {
 // Only what upsertContractLocally needs, plus a cursor. Validated against the
 // live schema; `customer { id }` and `billingPolicy` are what make customerId
 // and frequency populatable — the similar query on the dashboard omits both.
+// The line's `sellingPlanId` is how a new row finds its plan or bundle, and so
+// whether it is PREPAID: without it a prepaid contract is saved as postpaid,
+// gets no payment hold, and the billing cron charges the customer's card.
 export const CONTRACTS_PAGE_QUERY = `
   query ContractsPage($first: Int!, $after: String) {
     subscriptionContracts(first: $first, after: $after) {
@@ -34,7 +37,7 @@ export const CONTRACTS_PAGE_QUERY = `
           customer { id email }
           billingPolicy { interval intervalCount }
           lines(first: 1) {
-            edges { node { title sellingPlanName currentPrice { amount currencyCode } } }
+            edges { node { title sellingPlanId sellingPlanName currentPrice { amount currencyCode } } }
           }
         }
       }

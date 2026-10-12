@@ -43,7 +43,7 @@ import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { chargeCommission } from "./app-commission.server";
 import { sendPaymentRequest } from "./payment-email.server";
-import { ensurePrepaidHold, findPrepaidHold } from "./prepaid-hold.server";
+import { ensurePrepaidHold, ensurePrepaidHolds, findPrepaidHold } from "./prepaid-hold.server";
 import {
   activateContract,
   formatUserErrors,
@@ -77,6 +77,8 @@ export const PREPAID_CONTRACT_ATTRIBUTE = "_kas_prepaid_invoice";
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Bounds one run so a backlog can't become a request that never returns.
 const MAX_PER_RUN = 100;
+// The same, for a run inside a merchant's request (runPrepaidForShop).
+const MAX_PER_SYNC = 25;
 // A CREATING row older than this was abandoned mid-way (crash, timeout) and
 // may be picked up again.
 const STALE_CREATING_MS = 15 * 60 * 1000;
@@ -568,31 +570,36 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
  *
  * Safe to re-run: a cycle that already has a live invoice is skipped, and a
  * FAILED one is retried.
+ *
+ * `shop` limits it to one shop and `max` to that many emails, for a run inside
+ * a merchant's request (runPrepaidForShop).
  */
-export async function issueDueRenewalInvoices(): Promise<{
+export async function issueDueRenewalInvoices(opts: { shop?: string; max?: number } = {}): Promise<{
   checked: number; sent: number; results: Array<{ subscriptionId: string; result: string }>;
 }> {
   const results: Array<{ subscriptionId: string; result: string }> = [];
   let sent = 0;
   const now = new Date();
+  const max = opts.max ?? MAX_PER_RUN;
 
   // Widest possible lead time (the Settings maximum is 14 days); each shop's own
   // lead time is applied below.
   const due = await db.subscription.findMany({
     where: {
+      ...(opts.shop ? { shop: opts.shop } : {}),
       status:          "ACTIVE",
       paymentMode:     "PREPAID",
       nextBillingDate: { lte: new Date(now.getTime() + 14 * DAY_MS) },
     },
     orderBy: { nextBillingDate: "asc" },
-    take:    MAX_PER_RUN * 2,
+    take:    max * 2,
   });
 
   const graphqlFor = adminCache();
   const leadCache  = new Map<string, number>();
 
   for (const sub of due) {
-    if (sent >= MAX_PER_RUN) break;
+    if (sent >= max) break;
 
     if (!leadCache.has(sub.shop)) leadCache.set(sub.shop, (await settingsFor(sub.shop)).leadDays);
     const leadDays = leadCache.get(sub.shop)!;
@@ -920,9 +927,9 @@ async function settlePaidInvoice(
 /**
  * Polls open invoices for payment, sends reminders, expires unpaid ones and
  * retries INITIAL invoices that were paid but whose contract wasn't created.
- * Never throws.
+ * Never throws. `shop` limits it to one shop's invoices.
  */
-export async function processOpenInvoices(): Promise<{
+export async function processOpenInvoices(opts: { shop?: string } = {}): Promise<{
   checked: number; paid: number; reminded: number; expired: number;
 }> {
   const now = new Date();
@@ -933,6 +940,7 @@ export async function processOpenInvoices(): Promise<{
   try {
     open = await db.prepaidInvoice.findMany({
       where: {
+        ...(opts.shop ? { shop: opts.shop } : {}),
         OR: [
           { status: "SENT" },
           // Paid INITIAL invoices still waiting for their contract.
@@ -1068,6 +1076,41 @@ async function sendReminder(graphql: AdminGraphQL, invoice: InvoiceRow & {
 }
 
 // ─── Merchant actions ────────────────────────────────────────────────────────
+
+export interface PrepaidRunSummary {
+  /** Payment links emailed. */
+  sent:   number;
+  /** Paid links recorded. */
+  paid:   number;
+  /** Why links couldn't be sent, each reason once. */
+  failed: string[];
+}
+
+/**
+ * "Sync from Shopify" on the Subscriptions page: the hourly job's prepaid work
+ * (api.cron.reconcile.ts) for one shop, now. Payment links are otherwise only
+ * sent by that job, so this is what gets one out where it isn't running, and
+ * what tells the merchant why a link couldn't be sent. Never throws.
+ */
+export async function runPrepaidForShop(shop: string): Promise<PrepaidRunSummary> {
+  const started = new Date();
+  const summary: PrepaidRunSummary = { sent: 0, paid: 0, failed: [] };
+  try {
+    await ensurePrepaidHolds(shop);
+    // Capped: this runs inside the merchant's request. The hourly job sends the rest.
+    summary.sent = (await issueDueRenewalInvoices({ shop, max: MAX_PER_SYNC })).sent;
+    summary.paid = (await processOpenInvoices({ shop })).paid;
+
+    const failed = await db.prepaidInvoice.findMany({
+      where:  { shop, status: "FAILED", updatedAt: { gte: started } },
+      select: { error: true },
+    });
+    summary.failed = [...new Set(failed.map((f) => f.error || "The payment email could not be sent."))];
+  } catch (err) {
+    summary.failed.push(errorText(err));
+  }
+  return summary;
+}
 
 /**
  * "Resend payment email" on the Subscriptions page. Re-sends an open link, or

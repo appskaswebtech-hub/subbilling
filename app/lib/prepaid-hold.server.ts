@@ -56,12 +56,14 @@ export async function ensurePrepaidHold(subscriptionId: string): Promise<boolean
 
 /**
  * The safety net: gives every live prepaid subscription that lacks a hold one.
- * Run hourly by the reconcile cron, ahead of the daily billing run.
+ * Run hourly by the reconcile cron, ahead of the daily billing run, for every
+ * shop; "Sync from Shopify" runs it for its own shop.
  */
-export async function ensurePrepaidHolds(): Promise<number> {
+export async function ensurePrepaidHolds(shop?: string): Promise<number> {
   try {
     const missing = await db.subscription.findMany({
       where: {
+        ...(shop ? { shop } : {}),
         paymentMode:     "PREPAID",
         status:          { in: ["ACTIVE", "PAUSED"] },
         billingAttempts: { none: { status: "PENDING" } },

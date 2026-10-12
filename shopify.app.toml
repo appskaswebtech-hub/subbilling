@@ -12,7 +12,7 @@ automatically_update_urls_on_dev = true
 api_version = "2026-04"
 
   [[webhooks.subscriptions]]
-  uri = "https://subscription.kaswebtechsolutions.com/webhooks"
+  uri = "/webhooks"
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
   topics = [
   "subscription_billing_attempts/failure",
@@ -22,11 +22,11 @@ api_version = "2026-04"
 ]
 
   [[webhooks.subscriptions]]
-  uri = "https://subscription.kaswebtechsolutions.com/webhooks/app/uninstalled"
+  uri = "/webhooks/app/uninstalled"
   topics = [ "app/uninstalled" ]
 
   [[webhooks.subscriptions]]
-  uri = "https://subscription.kaswebtechsolutions.com/webhooks/app/scopes_update"
+  uri = "/webhooks/app/scopes_update"
   topics = [ "app/scopes_update" ]
 
 [access_scopes]
