@@ -11,7 +11,7 @@
 //
 // Flow:
 //   1. Auth: check x-cron-secret header OR ?secret= query param
-//   2. Find ACTIVE subscriptions with nextBillingDate <= now, no PENDING attempt
+//   2. Find ACTIVE postpaid subscriptions with nextBillingDate <= now, no PENDING attempt
 //   3. Re-fetch each sub before billing (race condition guard)
 //   4. Call subscriptionBillingAttemptCreate — always write PENDING
 //   5. Advance nextBillingDate atomically (cron owns this — webhook only overrides if Shopify returns a future date)
@@ -139,6 +139,7 @@ async function runBilling() {
   const dueSubs = await db.subscription.findMany({
     where: {
       status:          "ACTIVE",
+      paymentMode:     { not: "PREPAID" },
       nextBillingDate: { lte: now },
       billingAttempts: {
         none: { status: "PENDING" },

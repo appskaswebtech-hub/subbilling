@@ -142,7 +142,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   const subscription = await prisma.subscription.findFirst({
     where:   { id: params.id, shop: session.shop },
-    include: { billingAttempts: { orderBy: { createdAt: "desc" }, take: 50 } },
+    include: {
+      billingAttempts: { orderBy: { createdAt: "desc" }, take: 50 },
+      // The latest payment link, for the "Payment link" row. Postpaid subscriptions have none.
+      prepaidInvoices: {
+        orderBy: { createdAt: "desc" },
+        take:    1,
+        select:  { status: true, sender: true, sentAt: true, dueAt: true, paidAt: true, error: true },
+      },
+    },
   });
 
   if (!subscription) throw new Response("Not found", { status: 404 });
@@ -372,6 +380,31 @@ function fmtDateTime(date: string | Date) {
   return new Date(date).toLocaleString("en-GB", {
     year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
+}
+
+type PaymentLink = {
+  status: string; sender: string;
+  sentAt: string | null; dueAt: string | null; paidAt: string | null; error: string | null;
+};
+
+/**
+ * Where a prepaid subscription's latest payment link stands. Says how and to
+ * whom it was sent, so an email that never arrived can be traced: `sender` is
+ * what actually delivered it, not what the plan asked for.
+ */
+function paymentLinkText(link: PaymentLink | undefined, email: string): string {
+  if (!link) return "Not sent yet.";
+  const via = link.sender === "SMTP" ? "your email server (SMTP)" : "Shopify email";
+  switch (link.status) {
+    case "SENT":
+      return `Sent${link.sentAt ? ` ${fmtDateTime(link.sentAt)}` : ""} by ${via}${email ? ` to ${email}` : ""}.`
+        + (link.dueAt ? ` Pay by ${fmt(link.dueAt)}.` : "");
+    case "PAID":      return `Paid${link.paidAt ? ` ${fmtDateTime(link.paidAt)}` : ""}.`;
+    case "FAILED":    return `Not sent: ${link.error || "the email could not be sent."}`;
+    case "EXPIRED":   return `Expired unpaid${link.dueAt ? ` on ${fmt(link.dueAt)}` : ""}.`;
+    case "CANCELLED": return "Cancelled.";
+    default:          return "Being sent…";
+  }
 }
 
 
@@ -713,6 +746,15 @@ export default function SubscriptionDetail() {
                     : "Postpaid: card charged automatically"}
                 </Text>
               </DetailRow>
+              {s.paymentMode === "PREPAID" && (
+                <DetailRow label="Payment link">
+                  <div style={{ maxWidth: "360px", marginLeft: "auto" }}>
+                    <Text as="span" variant="bodySm">
+                      {paymentLinkText(s.prepaidInvoices?.[0] as PaymentLink | undefined, s.customerEmail)}
+                    </Text>
+                  </div>
+                </DetailRow>
+              )}
               <DetailRow label="Price">
                 <Text as="span" variant="bodySm" fontWeight="semibold">${s.price.toFixed(2)}</Text>
               </DetailRow>

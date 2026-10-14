@@ -3560,7 +3560,7 @@ export default function Plans() {
                   options={leadOptions}
                   value={leadValue}
                   onChange={setPrepaidLeadHours}
-                  helpText="How long before each billing date the customer is emailed the link. Links go out once an hour, so it can arrive up to an hour after this point."
+                  helpText="How long before each billing date the customer is emailed the link. Links go out every 15 minutes, so it can arrive up to 15 minutes after this point."
                 />
               )}
               {editingPlanId && paymentMode !== openedPaymentMode && (

@@ -83,6 +83,18 @@ const MAX_PER_SYNC = 25;
 // A CREATING row older than this was abandoned mid-way (crash, timeout) and
 // may be picked up again.
 const STALE_CREATING_MS = 15 * 60 * 1000;
+// Shopify finishes some draft orders after creating them (DraftOrder.ready), a
+// bundle's among them, and an invoice emailed before then never reached the
+// customer. A new draft is given this long to get ready before its email.
+const READY_WAIT_MS = 15 * 1000;
+const READY_POLL_MS = 1000;
+// Reads of DraftOrder.invoiceSentAt, READY_POLL_MS apart, before a Shopify
+// invoice email counts as not sent.
+const SENT_CHECKS = 3;
+
+// Kept on a FAILED invoice; the next run picks it up with the same draft order.
+const NOT_READY_ERROR   = "Shopify was still preparing the draft order, so the payment link wasn't emailed yet.";
+const UNCONFIRMED_ERROR = "Shopify didn't confirm that it emailed the payment link.";
 
 // ─── GraphQL ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +114,12 @@ const DRAFT_ORDER_CREATE = `#graphql
 const DRAFT_ORDER_STATUS = `#graphql
   query PrepaidDraftOrderStatus($id: ID!) {
     draftOrder(id: $id) { id status order { id displayFinancialStatus } }
+  }
+`;
+
+const DRAFT_ORDER_DELIVERY = `#graphql
+  query PrepaidDraftOrderDelivery($id: ID!) {
+    draftOrder(id: $id) { id ready invoiceSentAt }
   }
 `;
 
@@ -430,6 +448,59 @@ async function paidOrderFor(graphql: AdminGraphQL, draftOrderId: string): Promis
     : null;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function draftDelivery(graphql: AdminGraphQL, draftOrderId: string): Promise<{ ready: boolean; invoiceSentAt: string | null } | null> {
+  const data = await gql<{
+    draftOrder: { ready: boolean; invoiceSentAt: string | null } | null;
+  }>(graphql, DRAFT_ORDER_DELIVERY, { id: draftOrderId });
+  return data.draftOrder;
+}
+
+// The two checks below fail open: a read that errors lets the email go ahead
+// as it did before they existed, rather than holding back every link.
+
+/** Waits up to READY_WAIT_MS for a new draft order. Returns whether it got ready. */
+async function waitUntilReady(graphql: AdminGraphQL, draftOrderId: string): Promise<boolean> {
+  const started = Date.now();
+  for (;;) {
+    let ready: boolean;
+    try {
+      ready = (await draftDelivery(graphql, draftOrderId))?.ready ?? false;
+    } catch (err) {
+      console.warn(`[prepaid] could not check draft order ${draftOrderId}; emailing it anyway:`, errorText(err));
+      return true;
+    }
+    if (ready) {
+      const waited = Date.now() - started;
+      if (waited > 0) console.log(`[prepaid] draft order ${draftOrderId} ready after ${(waited / 1000).toFixed(1)}s`);
+      return true;
+    }
+    if (Date.now() - started >= READY_WAIT_MS) {
+      console.warn(`[prepaid] draft order ${draftOrderId} still not ready after ${READY_WAIT_MS / 1000}s`);
+      return false;
+    }
+    await sleep(READY_POLL_MS);
+  }
+}
+
+/** Whether Shopify recorded an invoice email newer than `before`. */
+async function invoiceEmailRecorded(graphql: AdminGraphQL, draftOrderId: string, before: string | null): Promise<boolean> {
+  for (let i = 0; i < SENT_CHECKS; i++) {
+    if (i > 0) await sleep(READY_POLL_MS);
+    let sentAt: string | null;
+    try {
+      sentAt = (await draftDelivery(graphql, draftOrderId))?.invoiceSentAt ?? null;
+    } catch (err) {
+      console.warn(`[prepaid] could not check the invoice email of draft order ${draftOrderId}:`, errorText(err));
+      return true;
+    }
+    if (sentAt && sentAt !== before) return true;
+  }
+  console.warn(`[prepaid] Shopify recorded no invoice email for draft order ${draftOrderId}`);
+  return false;
+}
+
 // ─── Building and sending one invoice ────────────────────────────────────────
 
 /**
@@ -516,7 +587,9 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
 
     // ── Draft order (once) ─────────────────────────────────────
     let { draftOrderId, invoiceUrl, amount, currency } = invoice;
+    let newDraft = false;
     if (!draftOrderId || !invoiceUrl) {
+      newDraft = true;
       const draft = await createDraftOrder(graphql, draftInput);
       draftOrderId = draft.id;
       invoiceUrl   = draft.invoiceUrl;
@@ -537,10 +610,25 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
       }
     }
 
+    // What a FAILED invoice tells the merchant happens next: renewals are
+    // picked up by the next run, a first payment only by Resend.
+    const isRenewal = invoice.kind === "RENEWAL";
+    const nextStep  = isRenewal ? " It's sent on the next automatic run." : " Use Resend to send it.";
+
+    // ── Ready to email? ────────────────────────────────────────
+    // A draft order made just now may still be finishing in Shopify; the next
+    // run reuses it, by when it is long done. One made earlier is emailed as
+    // is, like Resend always did.
+    let sentBefore: string | null = null;
+    if (newDraft) {
+      if (!(await waitUntilReady(graphql, draftOrderId))) throw new Error(NOT_READY_ERROR + nextStep);
+    } else {
+      sentBefore = (await draftDelivery(graphql, draftOrderId).catch(() => null))?.invoiceSentAt ?? null;
+    }
+
     // ── Email ──────────────────────────────────────────────────
     const now   = new Date();
     const dueAt = new Date(now.getTime() + settings.payWindowDays * DAY_MS);
-    const isRenewal = invoice.kind === "RENEWAL";
 
     // The merchant's own wording (Settings → Prepaid & email), or the default.
     const text = await emailText(invoice.shop, isRenewal ? "renewal" : "initial", {
@@ -568,6 +656,16 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
       },
     });
 
+    // Shopify stamps the draft when it emails an invoice. No new stamp: treat
+    // it as unsent, so the next run tries again. Only once, though: if the
+    // stamp is missing a second time too, it stays SENT with a note rather than
+    // emailing the customer every run.
+    let note = result.fallbackReason;
+    if (result.sentWith === "SHOPIFY" && !(await invoiceEmailRecorded(graphql, draftOrderId, sentBefore))) {
+      if (!invoice.error?.startsWith(UNCONFIRMED_ERROR)) throw new Error(UNCONFIRMED_ERROR + nextStep);
+      note = UNCONFIRMED_ERROR;
+    }
+
     await db.prepaidInvoice.update({
       where: { id: invoice.id },
       data: {
@@ -576,7 +674,7 @@ async function deliverInvoice(graphql: AdminGraphQL, invoiceId: string): Promise
         sentAt: now,
         dueAt,
         // Keep the fallback visible to the merchant; clear any earlier failure.
-        error:  result.fallbackReason,
+        error:  note,
       },
     });
 

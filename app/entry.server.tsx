@@ -7,8 +7,13 @@ import {
 } from "@remix-run/node";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { startScheduler } from "./lib/scheduler.server";
 
 export const streamTimeout = 5000;
+
+// Once, when the server loads this file: prepaid links and reminders go out
+// from here on a timer (production only; see scheduler.server.ts).
+startScheduler();
 
 export default async function handleRequest(
   request: Request,

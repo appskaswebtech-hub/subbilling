@@ -1,15 +1,17 @@
 // app/lib/prepaid-hold.server.ts
 //
-// Keeps prepaid subscriptions out of the automatic billing cron WITHOUT
-// changing that cron (app/routes/api.cron.billing.ts stays self-contained).
+// Keeps prepaid subscriptions out of the automatic billing cron
+// (app/routes/api.cron.billing.ts).
 //
-// The billing cron charges every ACTIVE subscription that is due, except one
-// that already has a PENDING BillingAttempt, since its guard reads that as "a
-// charge is already in flight". A prepaid subscription is never charged
-// automatically: each cycle is paid by an emailed link instead
-// (app/lib/prepaid.server.ts). So every prepaid subscription always holds
-// exactly one PENDING attempt, a "payment hold", standing for the cycle that
-// is waiting to be paid by link. The cron then skips it by its own rules.
+// A prepaid subscription is never charged automatically: each cycle is paid by
+// an emailed link instead (app/lib/prepaid.server.ts). The cron skips prepaid
+// rows itself, and it also skips any subscription that already has a PENDING
+// BillingAttempt, since its guard reads that as "a charge is already in
+// flight". So every prepaid subscription always holds exactly one PENDING
+// attempt, a "payment hold", standing for the cycle that is waiting to be paid
+// by link. That keeps it out of the cron twice over, and prepaid.server.ts
+// relies on it: the hold carries the cycle's amount and becomes its SUCCESS
+// attempt when the link is paid.
 //
 // The hold's lifecycle:
 //   created   with the subscription (upsertContractLocally), or by the hourly
