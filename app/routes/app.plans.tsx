@@ -3,6 +3,7 @@
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
 import {
+  Link,
   useLoaderData,
   useSubmit,
   useNavigation,
@@ -3060,8 +3061,8 @@ export default function Plans() {
                   </span>
                 </Text>
               </div>
-              <a
-                href="/app/billing"
+              <Link
+                to="/app/billing"
                 style={{
                   fontSize: "12px",
                   fontWeight: 600,
@@ -3076,7 +3077,7 @@ export default function Plans() {
                 }}
               >
                 Upgrade →
-              </a>
+              </Link>
             </div>
           )}
 

@@ -1,6 +1,7 @@
 // app/routes/app.tsx
 
 import type { HeadersFunction, LoaderFunctionArgs } from "@remix-run/node";
+import { useEffect }  from "react";
 import { Link, Outlet, useLoaderData, useRouteError, useNavigate, useLocation } from "@remix-run/react";
 import { boundary }    from "@shopify/shopify-app-remix/server";
 import { AppProvider } from "@shopify/shopify-app-remix/react";
@@ -10,6 +11,8 @@ import themeStyles     from "../styles/theme.css?url";
 import { Text, List }  from "@shopify/polaris";
 import { authenticate }      from "../shopify.server";
 import { getShopPlanFromDB } from "../utils/planUtils";
+import { hasPrepaidActivity } from "../lib/activity.server";
+import { rememberEmbedded, withEmbedded } from "../lib/embedded-params";
 import { PLANS, PLAN_ORDER, formatRate } from "../config/plans";
 import { BRAND_GRADIENT } from "../config/theme";
 
@@ -34,9 +37,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const hasPlan     = ACTIVE_PLANS.includes(record.plan);
 
   return {
-    apiKey:   process.env.SHOPIFY_API_KEY || "",
+    apiKey:     process.env.SHOPIFY_API_KEY || "",
     hasPlan,
-    planName: record.plan,
+    planName:   record.plan,
+    // The Activity page is for prepaid subscriptions; hidden until there are some.
+    hasPrepaid: await hasPrepaidActivity(session.shop),
   };
 };
 
@@ -234,8 +239,21 @@ function PlanGatePopup() {
 
 // ─── APP SHELL ────────────────────────────────────────────────
 export default function App() {
-  const { apiKey, hasPlan } = useLoaderData<typeof loader>();
-  const { pathname }        = useLocation();
+  const { apiKey, hasPlan, hasPrepaid } = useLoaderData<typeof loader>();
+  const location            = useLocation();
+  const { pathname }        = location;
+
+  // After every navigation, put the store details back into the frame's
+  // address, so a reload (e.g. Remix's after a deploy) reopens this page
+  // instead of the "Log in" form (see embedded-params.ts). The router's own
+  // history state is kept as is.
+  useEffect(() => {
+    let storage: Storage | null = null;
+    try { storage = window.sessionStorage; } catch { /* blocked in this frame */ }
+    const params = rememberEmbedded(window.location.search, storage);
+    const next   = withEmbedded(window.location, params);
+    if (next) window.history.replaceState(window.history.state, "", next);
+  }, [location]);
 
   const isBillingPage = NO_POPUP_PATHS.some((p) => pathname.startsWith(p));
   const showPopup     = !hasPlan && !isBillingPage;
@@ -248,6 +266,7 @@ export default function App() {
         <Link to="/app/bundles">Bundles</Link>
         <Link to="/app/subscriptions">Subscriptions</Link>
         <Link to="/app/billing">Upgrade Plans</Link>
+        {hasPrepaid && <Link to="/app/activity">Activity</Link>}
         <Link to="/app/customers">Customers</Link>
         <Link to="/app/api-key">API Key</Link>
         <Link to="/app/automations">Automations</Link>

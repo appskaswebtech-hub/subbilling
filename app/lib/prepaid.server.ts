@@ -337,6 +337,25 @@ async function resolveLeadHours(
   return (await own()) ?? (await settingsFor(shop)).leadDays * 24;
 }
 
+/** Lead times already looked up, keyed by shop, bundle and plan; one per run or page. */
+export type LeadCache = Map<string, number>;
+
+/**
+ * When the payment link for a prepaid subscription's current billing date goes
+ * out: that date minus its lead time. The upkeep job sends it on its first run
+ * at or after this moment.
+ */
+export async function nextLinkAt(
+  sub: { shop: string; bundleId: string | null; sellingPlanId: string | null; nextBillingDate: Date },
+  cache: LeadCache = new Map(),
+): Promise<Date> {
+  const key = `${sub.shop}|${sub.bundleId ?? ""}|${sub.sellingPlanId ?? ""}`;
+  if (!cache.has(key)) {
+    cache.set(key, await resolveLeadHours(sub.shop, { bundleId: sub.bundleId, sellingPlanId: sub.sellingPlanId }));
+  }
+  return new Date(sub.nextBillingDate.getTime() - cache.get(key)! * HOUR_MS);
+}
+
 function parseSetup(invoice: { setupJson: string | null }): InitialSetup | null {
   if (!invoice.setupJson) return null;
   try { return JSON.parse(invoice.setupJson) as InitialSetup; } catch { return null; }
@@ -728,18 +747,23 @@ export async function issueDueRenewalInvoices(opts: { shop?: string; max?: numbe
   });
 
   const graphqlFor = adminCache();
-  const leadCache  = new Map<string, number>();
+  const leadCache: LeadCache = new Map();
+
+  // Why candidates were left alone, for the summary line: without it, a link
+  // that isn't due yet and one that is stuck look the same in the log.
+  const skipped = new Map<string, number>();
+  const skip = (why: string) => skipped.set(why, (skipped.get(why) ?? 0) + 1);
+  let nextUp: { title: string; at: Date } | null = null;
 
   for (const sub of due) {
     if (sent >= max) break;
 
-    // One lookup per plan or bundle per run.
-    const leadKey = `${sub.shop}|${sub.bundleId ?? ""}|${sub.sellingPlanId ?? ""}`;
-    if (!leadCache.has(leadKey)) {
-      leadCache.set(leadKey, await resolveLeadHours(sub.shop, { bundleId: sub.bundleId, sellingPlanId: sub.sellingPlanId }));
+    const linkAt = await nextLinkAt(sub, leadCache);
+    if (linkAt > now) {
+      skip("waiting");
+      if (!nextUp || linkAt < nextUp.at) nextUp = { title: sub.productTitle, at: linkAt };
+      continue;
     }
-    const leadHours = leadCache.get(leadKey)!;
-    if (sub.nextBillingDate.getTime() > now.getTime() + leadHours * HOUR_MS) continue;
 
     try {
       const existing = await db.prepaidInvoice.findUnique({
@@ -760,10 +784,12 @@ export async function issueDueRenewalInvoices(opts: { shop?: string; max?: numbe
       let reissue = false;
       if (existing) {
         if (existing.status === "SENT" || existing.status === "PAID") {
+          skip(existing.status === "SENT" ? "open link" : "paid");
           results.push({ subscriptionId: sub.id, result: `already ${existing.status}` });
           continue;
         }
         if (existing.status === "CREATING" && now.getTime() - existing.updatedAt.getTime() < STALE_CREATING_MS) {
+          skip("in progress");
           results.push({ subscriptionId: sub.id, result: "in progress" });
           continue;
         }
@@ -822,7 +848,13 @@ export async function issueDueRenewalInvoices(opts: { shop?: string; max?: numbe
     }
   }
 
-  console.log(`[prepaid] renewal invoices: ${sent} sent of ${due.length} candidate(s)`);
+  // e.g. "0 sent of 2 candidate(s) · 1 waiting, 1 open link · next: "Bicorn Bundle" at 2026-10-15 10:30 UTC"
+  const why  = ["waiting", "open link", "paid", "in progress"]
+    .filter((reason) => skipped.has(reason))
+    .map((reason) => `${skipped.get(reason)} ${reason}`)
+    .join(", ");
+  const next = nextUp ? ` · next: "${nextUp.title}" at ${nextUp.at.toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
+  console.log(`[prepaid] renewal invoices: ${sent} sent of ${due.length} candidate(s)${why ? ` · ${why}` : ""}${next}`);
   return { checked: due.length, sent, results };
 }
 

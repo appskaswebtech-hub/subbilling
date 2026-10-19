@@ -7,7 +7,7 @@
 import { useState } from "react";
 import type { LoaderFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { useLoaderData } from "@remix-run/react";
+import { Link, useLoaderData } from "@remix-run/react";
 import { Page, Text, BlockStack, InlineStack } from "@shopify/polaris";
 import { TitleBar } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
@@ -482,7 +482,7 @@ export default function SupportPage() {
             <Text as="p" variant="bodySm">
               Need faster replies? <strong>Pro</strong> and <strong>Advanced</strong> include priority
               support with a {RESPONSE_TIME.priority.toLowerCase()} response time.{" "}
-              <a href="/app/billing" style={{ color: T.blueFg, fontWeight: 600 }}>Compare plans →</a>
+              <Link to="/app/billing" style={{ color: T.blueFg, fontWeight: 600 }}>Compare plans →</Link>
             </Text>
           </div>
         )}

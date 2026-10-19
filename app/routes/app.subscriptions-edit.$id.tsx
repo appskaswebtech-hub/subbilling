@@ -23,6 +23,7 @@ import {
 } from "../lib/subscription-sync.server";
 import { handleContractEdit } from "../lib/subscription-edit.server";
 import { chargeInFlight } from "../lib/prepaid-hold.server";
+import { nextLinkAt } from "../lib/prepaid.server";
 import { formatMoney } from "../config/currency";
 import { CommissionCell } from "../components/CommissionCell";
 import { splitCommissions } from "../lib/commission-display";
@@ -148,7 +149,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       prepaidInvoices: {
         orderBy: { createdAt: "desc" },
         take:    1,
-        select:  { status: true, sender: true, sentAt: true, dueAt: true, paidAt: true, error: true },
+        select:  { status: true, sender: true, sentAt: true, dueAt: true, paidAt: true, error: true, cycleDate: true },
       },
     },
   });
@@ -232,8 +233,22 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     commissionRows.map((c) => [c.billingAttemptId, c]),
   );
 
+  // When this renewal's payment link goes out, while it has none: the latest
+  // link is for an earlier renewal (paid), expired, withdrawn, or there's none.
+  let nextLink: { at: string; due: boolean } | null = null;
+  if (subscription.paymentMode === "PREPAID" && subscription.status === "ACTIVE") {
+    const latest = subscription.prepaidInvoices[0];
+    const live   = !!latest && latest.cycleDate.getTime() === subscription.nextBillingDate.getTime()
+      && ["CREATING", "SENT", "FAILED", "PAID"].includes(latest.status);
+    if (!live) {
+      const at = await nextLinkAt(subscription);
+      nextLink = { at: at.toISOString(), due: at <= new Date() };
+    }
+  }
+
   return json({
     subscription,
+    nextLink,
     contract,
     contractError,
     orders,
@@ -477,7 +492,7 @@ function SectionCard({ title, icon, children }: { title: string; icon?: string; 
 export default function SubscriptionDetail() {
   const {
     subscription, contract, contractError, revision, hasPendingAttempt, editLock,
-    orders, ordersError, ordersScopeMissing, commissions,
+    orders, ordersError, ordersScopeMissing, commissions, nextLink,
   } = useLoaderData<typeof loader>();
   const actionData        = useActionData<typeof action>();
   const submit            = useSubmit();
@@ -752,6 +767,13 @@ export default function SubscriptionDetail() {
                     <Text as="span" variant="bodySm">
                       {paymentLinkText(s.prepaidInvoices?.[0] as PaymentLink | undefined, s.customerEmail)}
                     </Text>
+                    {nextLink && (
+                      <Text as="p" variant="bodySm" tone="subdued">
+                        {nextLink.due
+                          ? "Next link: due now, goes out within 15 minutes."
+                          : `Next link: around ${fmtDateTime(nextLink.at)}.`}
+                      </Text>
+                    )}
                   </div>
                 </DetailRow>
               )}

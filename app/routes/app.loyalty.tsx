@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "@remix-run/node";
 import { json } from "@remix-run/node";
-import { useLoaderData, useActionData, useNavigation, useSubmit, useNavigate } from "@remix-run/react";
+import { Link, useLoaderData, useActionData, useNavigation, useSubmit, useNavigate } from "@remix-run/react";
 import { Page, BlockStack, InlineStack, Text, TextField } from "@shopify/polaris";
 import { Select } from "../components/AppSelect";
 import { TitleBar } from "@shopify/app-bridge-react";
@@ -185,8 +185,8 @@ export default function LoyaltyDiscountPage() {
                 reward customers for keeping their subscription active.
               </Text>
             </div>
-            <a
-              href="/app/billing"
+            <Link
+              to="/app/billing"
               style={{
                 fontSize: "12px", fontWeight: 600,
                 color: T.amberFg, background: "#fff",
@@ -196,7 +196,7 @@ export default function LoyaltyDiscountPage() {
               }}
             >
               Upgrade plan →
-            </a>
+            </Link>
           </div>
         )}
 
